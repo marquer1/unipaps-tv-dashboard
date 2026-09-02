@@ -80,35 +80,32 @@ CARRIERS = [
 # --------------------------------------------------------------------
 # Prevision "commandes a traiter d'ici 15h"
 # --------------------------------------------------------------------
-# Calculee a partir de deux exports Shopify Analytics ("Ventes totales au
-# fil du temps") sur la periode 16/03/2024 - 02/09/2026 :
-#   - repartition des commandes par heure de la journee (agregee, toutes
-#     dates confondues)
-#   - repartition des commandes par jour de la semaine (agregee, toutes
-#     heures confondues)
-# Les deux ne donnent pas le vrai croisement heure x jour (Shopify ne
-# l'exporte pas directement), donc on les combine par approximation :
-#   commandes attendues d'ici 15h
-#     = volume moyen du jour de la semaine
-#       x (part du volume journalier recue habituellement entre "maintenant"
-#          et 15h, d'apres la courbe horaire moyenne)
+# Principe : on regarde combien de commandes sont deja arrivees
+# AUJOURD'HUI (nombre reel, interroge en direct sur Shopify), on compare
+# cette valeur a la part du volume qu'on recoit habituellement a cette
+# heure-ci (courbe horaire moyenne calculee sur l'historique Shopify
+# Analytics 16/03/2024 - 02/09/2026), puis on extrapole jusqu'a 15h avec
+# une simple regle de trois :
+#
+#   total_prevu_aujourd_hui = commandes_du_jour_reel / %_recu_a_cette_heure
+#                              x %_recu_a_15h
+#   commandes_attendues_en_plus = total_prevu_aujourd_hui - commandes_du_jour_reel
+#   prevision_backlog = commandes_a_traiter_actuelles + commandes_attendues_en_plus
+#
+# Exemple : 28 commandes recues a 13h13. La courbe horaire dit qu'on a
+# habituellement recu ~30,7% du volume du jour a 13h13, et ~41,7% a 15h.
+# -> total_prevu = 28 / 30,7% x 41,7% = 38 -> +10 commandes attendues.
 TIMEZONE = os.environ.get("TZ_NAME", "Europe/Paris")
 PREDICTION_HOUR = int(os.environ.get("PREDICTION_HOUR", "15"))
 
 # Nombre de commandes par heure (index 0 = 00h-01h, ... 23 = 23h-00h),
-# agrege sur toute la periode.
+# agrege sur toute la periode. Sert uniquement a estimer la FORME de la
+# courbe (part du volume recue a telle heure), pas le volume absolu.
 HOURLY_ORDERS = [
     568, 204, 80, 47, 38, 59, 219, 598, 1162, 1844, 2070, 2130, 1989,
     2234, 2371, 2126, 2100, 2268, 2442, 2616, 2749, 3222, 2817, 1527,
 ]
 _HOURLY_TOTAL = sum(HOURLY_ORDERS)
-
-# Volume moyen de commandes par jour de la semaine (0 = dimanche ...
-# 6 = samedi, convention Shopify), calcule sur le nombre d'occurrences
-# de chaque jour entre le 16/03/2024 et le 02/09/2026.
-_WEEKDAY_TOTAL = [6335, 5634, 5453, 4655, 4284, 5123, 5996]
-_WEEKDAY_OCCURRENCES = [129, 129, 129, 129, 128, 128, 129]
-WEEKDAY_AVG_ORDERS = [t / n for t, n in zip(_WEEKDAY_TOTAL, _WEEKDAY_OCCURRENCES)]
 
 
 def _cumulative_pct(hour, minute):
@@ -121,20 +118,22 @@ def _cumulative_pct(hour, minute):
     return 100 * done / _HOURLY_TOTAL
 
 
-def compute_prediction(a_traiter):
+def compute_prediction(a_traiter, commandes_du_jour):
     """Renvoie (prediction_totale, commandes_attendues_en_plus) ou None
     si l'heure de reference est deja depassee."""
     now = datetime.now(ZoneInfo(TIMEZONE))
-    shopify_weekday = (now.weekday() + 1) % 7  # lundi=0 -> dimanche=0
     if now.hour >= PREDICTION_HOUR:
         return None
 
     pct_now = _cumulative_pct(now.hour, now.minute)
     pct_target = _cumulative_pct(PREDICTION_HOUR, 0)
-    pct_remaining = max(0, pct_target - pct_now)
 
-    avg_day_volume = WEEKDAY_AVG_ORDERS[shopify_weekday]
-    expected_new = avg_day_volume * pct_remaining / 100
+    if pct_now <= 0 or commandes_du_jour <= 0:
+        # Pas assez de donnees ce matin pour extrapoler : rien a ajouter.
+        return a_traiter, 0
+
+    total_prevu_aujourd_hui = commandes_du_jour * pct_target / pct_now
+    expected_new = max(0, total_prevu_aujourd_hui - commandes_du_jour)
     return a_traiter + round(expected_new), round(expected_new)
 
 
@@ -158,6 +157,7 @@ _cache = {
     "a_traiter": 0,
     "precommandes": 0,
     "carriers": {},
+    "commandes_du_jour": 0,
     "updated_at": None,
     "error": None,
 }
@@ -218,10 +218,14 @@ def refresh_cache():
             q = f'{BASE_FILTER} tag_not:"Précommande" tag:"{tag}"'
             carriers[label] = {"emoji": emoji, "count": count_orders(token, q)}
 
+        today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
+        commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
             _cache["carriers"] = carriers
+            _cache["commandes_du_jour"] = commandes_du_jour
             _cache["updated_at"] = time.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -259,6 +263,7 @@ def render_html():
         a_traiter = _cache["a_traiter"]
         precommandes = _cache["precommandes"]
         carriers = dict(_cache["carriers"])
+        commandes_du_jour = _cache["commandes_du_jour"]
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -267,7 +272,7 @@ def render_html():
     plateaux_precommandes = precommandes / COMMANDES_PAR_PLATEAU
     temps_precommandes = plateaux_precommandes * MINUTES_PAR_PLATEAU
 
-    prediction = compute_prediction(a_traiter)
+    prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
         pred_total, pred_new = prediction
         prediction_card = f"""
@@ -283,6 +288,7 @@ def render_html():
             <div class="stat-sub-label">Attendues</div>
           </div>
         </div>
+        <div class="stat-sub-label" style="margin-top:4px;">{commandes_du_jour} reçues aujourd'hui</div>
       </div>
     </div>"""
     else:
