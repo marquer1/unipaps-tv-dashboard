@@ -61,6 +61,7 @@ API_VERSION = "2024-10"
 
 COMMANDES_PAR_PLATEAU = 30
 MINUTES_PAR_PLATEAU = float(os.environ.get("MINUTES_PER_PLATEAU", "45"))
+SUCCESS_MESSAGE = os.environ.get("SUCCESS_MESSAGE", "RAS, bravo l'équipe !")
 
 # Filtre de base : commandes ouvertes, non expediees ou partiellement
 # expediees.
@@ -160,6 +161,9 @@ _cache = {
     "commandes_du_jour": 0,
     "updated_at": None,
     "error": None,
+    "frozen_a_traiter": None,
+    "frozen_date": None,
+    "frozen_carriers": None,
 }
 
 
@@ -218,13 +222,33 @@ def refresh_cache():
             q = f'{BASE_FILTER} tag_not:"Précommande" tag:"{tag}"'
             carriers[label] = {"emoji": emoji, "count": count_orders(token, q)}
 
-        today = datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
+        now = datetime.now(ZoneInfo(TIMEZONE))
+        today = now.strftime("%Y-%m-%d")
         commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
 
         with _cache_lock:
-            _cache["a_traiter"] = a_traiter
+            # Le compteur "Commandes a traiter" se fige a sa valeur de
+            # PREDICTION_HOUR (15h par defaut) jusqu'au lendemain : passe
+            # cette heure, on ne le recalcule plus, on garde la 1ere
+            # valeur capturee ce jour-la.
+            # Meme principe pour la repartition par transporteur : figee
+            # a 15h jusqu'au lendemain. Les precommandes, elles, restent
+            # toujours en direct (pas de gel).
+            if now.hour >= PREDICTION_HOUR:
+                if _cache["frozen_date"] != today:
+                    _cache["frozen_a_traiter"] = a_traiter
+                    _cache["frozen_carriers"] = carriers
+                    _cache["frozen_date"] = today
+                a_traiter_affiche = _cache["frozen_a_traiter"]
+                carriers_affiches = _cache["frozen_carriers"]
+            else:
+                _cache["frozen_date"] = None
+                a_traiter_affiche = a_traiter
+                carriers_affiches = carriers
+
+            _cache["a_traiter"] = a_traiter_affiche
             _cache["precommandes"] = precommandes
-            _cache["carriers"] = carriers
+            _cache["carriers"] = carriers_affiches
             _cache["commandes_du_jour"] = commandes_du_jour
             _cache["updated_at"] = time.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
@@ -271,6 +295,32 @@ def render_html():
     temps_a_traiter = plateaux_a_traiter * MINUTES_PAR_PLATEAU
     plateaux_precommandes = precommandes / COMMANDES_PAR_PLATEAU
     temps_precommandes = plateaux_precommandes * MINUTES_PAR_PLATEAU
+
+    if a_traiter == 0:
+        a_traiter_card = f"""
+    <div class="card">
+      <div class="icon-box icon-green">✅</div>
+      <div>
+        <div class="stat-label">Commandes à traiter</div>
+        <div class="stat-value green" style="font-size:26px;">{SUCCESS_MESSAGE}</div>
+      </div>
+    </div>"""
+    else:
+        a_traiter_card = f"""
+    <div class="card">
+      <div class="icon-box icon-orange">📦</div>
+      <div>
+        <div class="stat-label">Commandes à traiter</div>
+        <div class="stat-row">
+          <div class="stat-value orange">{a_traiter}</div>
+          <div class="divider"></div>
+          <div>
+            <div class="stat-sub">🛒 {format_plateaux(a_traiter)}</div>
+            <div class="stat-sub-label">Plateaux</div>
+          </div>
+        </div>
+      </div>
+    </div>"""
 
     prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
@@ -386,20 +436,7 @@ def render_html():
 <div class="wrap">
   {error_banner}
   <div class="grid-top">
-    <div class="card">
-      <div class="icon-box icon-orange">📦</div>
-      <div>
-        <div class="stat-label">Commandes à traiter</div>
-        <div class="stat-row">
-          <div class="stat-value orange">{a_traiter}</div>
-          <div class="divider"></div>
-          <div>
-            <div class="stat-sub">🛒 {format_plateaux(a_traiter)}</div>
-            <div class="stat-sub-label">Plateaux</div>
-          </div>
-        </div>
-      </div>
-    </div>
+    {a_traiter_card}
     <div class="card">
       <div class="icon-box icon-green">⏱️</div>
       <div>
