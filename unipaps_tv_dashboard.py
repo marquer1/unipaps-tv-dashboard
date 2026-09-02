@@ -284,11 +284,10 @@ def render_html():
           <div class="stat-value blue">{pred_total}</div>
           <div class="divider"></div>
           <div>
-            <div class="stat-sub blue">+{pred_new}</div>
-            <div class="stat-sub-label">Attendues</div>
+            <div class="stat-sub blue">🛒 {format_plateaux(pred_total)}</div>
+            <div class="stat-sub-label">Plateaux</div>
           </div>
         </div>
-        <div class="stat-sub-label" style="margin-top:4px;">{commandes_du_jour} reçues aujourd'hui</div>
       </div>
     </div>"""
     else:
