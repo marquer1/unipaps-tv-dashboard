@@ -52,7 +52,8 @@ import requests
 SHOP = os.environ.get("SHOPIFY_STORE", "noeudspapillon.myshopify.com")
 CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "REMPLACE_MOI_client_id")
 CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_secret")
-REFRESH_MINUTES = int(os.environ.get("REFRESH_MINUTES", "15"))
+REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
+REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
 PORT = int(os.environ.get("PORT", "8765"))
 API_VERSION = "2024-10"
 
@@ -169,7 +170,7 @@ def refresh_cache():
 def background_refresher():
     while True:
         refresh_cache()
-        time.sleep(max(60, REFRESH_MINUTES * 60))
+        time.sleep(max(5, REFRESH_SECONDS))
 
 
 # --------------------------------------------------------------------
@@ -223,7 +224,7 @@ def render_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_MINUTES * 60}">
+<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>Unipap's - Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
@@ -337,7 +338,7 @@ def render_html():
     </div>
   </div>
 
-  <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {REFRESH_MINUTES} min)</div>
+  <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {REFRESH_SECONDS} sec)</div>
 </div>
 </body>
 </html>"""
