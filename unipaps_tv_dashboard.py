@@ -250,12 +250,12 @@ def refresh_cache():
             _cache["precommandes"] = precommandes
             _cache["carriers"] = carriers_affiches
             _cache["commandes_du_jour"] = commandes_du_jour
-            _cache["updated_at"] = time.strftime("%d/%m/%Y %H:%M:%S")
+            _cache["updated_at"] = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
         with _cache_lock:
             _cache["error"] = str(exc)
-            _cache["updated_at"] = time.strftime("%d/%m/%Y %H:%M:%S")
+            _cache["updated_at"] = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
 
 
 def background_refresher():
