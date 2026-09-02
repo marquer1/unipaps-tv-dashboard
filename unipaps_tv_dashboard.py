@@ -162,9 +162,6 @@ _cache = {
     "commandes_du_jour": 0,
     "updated_at": None,
     "error": None,
-    "frozen_a_traiter": None,
-    "frozen_date": None,
-    "frozen_carriers": None,
 }
 
 
@@ -225,11 +222,24 @@ def refresh_cache():
         # tag "Precommande", plus de statut on hold) et qui basculent dans
         # "a traiter" alors qu'elles sont moins urgentes a expedier le
         # jour meme.
+        #
+        # A partir de PREDICTION_HOUR (15h par defaut), on ajoute une
+        # borne haute sur la date de creation (< 15h00 aujourd'hui) plutot
+        # que de garder un chiffre "fige" en memoire : ainsi le total
+        # n'inclut jamais les commandes recues apres 15h, et ce quel que
+        # soit le nombre de redemarrages du service (memoire remise a
+        # zero a chaque deploiement, sans que ca fausse le calcul).
         if now.hour >= PRECOMMANDE_CUTOFF_HOUR:
             hier = (now - timedelta(days=1)).strftime("%Y-%m-%d")
             a_traiter_filter = f'{BASE_FILTER} tag_not:"Précommande" created_at:>=\'{hier}\''
         else:
             a_traiter_filter = f'{BASE_FILTER} tag_not:"Précommande"'
+
+        if now.hour >= PREDICTION_HOUR:
+            cutoff_15h = now.replace(
+                hour=PREDICTION_HOUR, minute=0, second=0, microsecond=0
+            ).isoformat()
+            a_traiter_filter += f" created_at:<'{cutoff_15h}'"
 
         a_traiter = count_orders(token, a_traiter_filter)
         precommandes = count_orders(token, 'status:"open" tag:"Précommande"')
@@ -242,30 +252,11 @@ def refresh_cache():
         commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
 
         with _cache_lock:
-            # Le compteur "Commandes a traiter" se fige a sa valeur de
-            # PREDICTION_HOUR (15h par defaut) jusqu'au lendemain : passe
-            # cette heure, on ne le recalcule plus, on garde la 1ere
-            # valeur capturee ce jour-la.
-            # Meme principe pour la repartition par transporteur : figee
-            # a 15h jusqu'au lendemain. Les precommandes, elles, restent
-            # toujours en direct (pas de gel).
-            if now.hour >= PREDICTION_HOUR:
-                if _cache["frozen_date"] != today:
-                    _cache["frozen_a_traiter"] = a_traiter
-                    _cache["frozen_carriers"] = carriers
-                    _cache["frozen_date"] = today
-                a_traiter_affiche = _cache["frozen_a_traiter"]
-                carriers_affiches = _cache["frozen_carriers"]
-            else:
-                _cache["frozen_date"] = None
-                a_traiter_affiche = a_traiter
-                carriers_affiches = carriers
-
-            _cache["a_traiter"] = a_traiter_affiche
+            _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
-            _cache["carriers"] = carriers_affiches
+            _cache["carriers"] = carriers
             _cache["commandes_du_jour"] = commandes_du_jour
-            _cache["updated_at"] = datetime.now(ZoneInfo(TIMEZONE)).strftime("%d/%m/%Y %H:%M:%S")
+            _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
         with _cache_lock:
