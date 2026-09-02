@@ -42,7 +42,7 @@ INSTALLATION (sur le mini-PC branche a la TV)
 import os
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
@@ -62,6 +62,7 @@ API_VERSION = "2024-10"
 COMMANDES_PAR_PLATEAU = 30
 MINUTES_PAR_PLATEAU = float(os.environ.get("MINUTES_PER_PLATEAU", "45"))
 SUCCESS_MESSAGE = os.environ.get("SUCCESS_MESSAGE", "RAS, bravo l'équipe !")
+PRECOMMANDE_CUTOFF_HOUR = int(os.environ.get("PRECOMMANDE_CUTOFF_HOUR", "14"))
 
 # Filtre de base : commandes ouvertes, non expediees ou partiellement
 # expediees.
@@ -214,16 +215,30 @@ def refresh_cache():
     try:
         token = get_access_token()
 
-        a_traiter = count_orders(token, f'{BASE_FILTER} tag_not:"Précommande"')
+        now = datetime.now(ZoneInfo(TIMEZONE))
+        today = now.strftime("%Y-%m-%d")
+
+        # "Commandes a traiter" : jusqu'a PRECOMMANDE_CUTOFF_HOUR (14h par
+        # defaut) on compte tout. A partir de cette heure, on ne garde que
+        # les commandes creees hier ou aujourd'hui, pour exclure les
+        # anciennes precommandes qui viennent d'etre liberees (plus de
+        # tag "Precommande", plus de statut on hold) et qui basculent dans
+        # "a traiter" alors qu'elles sont moins urgentes a expedier le
+        # jour meme.
+        if now.hour >= PRECOMMANDE_CUTOFF_HOUR:
+            hier = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            a_traiter_filter = f'{BASE_FILTER} tag_not:"Précommande" created_at:>=\'{hier}\''
+        else:
+            a_traiter_filter = f'{BASE_FILTER} tag_not:"Précommande"'
+
+        a_traiter = count_orders(token, a_traiter_filter)
         precommandes = count_orders(token, 'status:"open" tag:"Précommande"')
 
         carriers = {}
         for emoji, label, tag in CARRIERS:
-            q = f'{BASE_FILTER} tag_not:"Précommande" tag:"{tag}"'
+            q = f'{a_traiter_filter} tag:"{tag}"'
             carriers[label] = {"emoji": emoji, "count": count_orders(token, q)}
 
-        now = datetime.now(ZoneInfo(TIMEZONE))
-        today = now.strftime("%Y-%m-%d")
         commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
 
         with _cache_lock:
