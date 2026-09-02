@@ -58,6 +58,22 @@ CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "REMPLACE_MOI_client_id")
 CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_secret")
 REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
+
+# A partir de EVENING_REFRESH_HOUR, rafraichissement plus espace pour
+# faciliter la lecture (moins de sautes d'affichage en fin de journee).
+EVENING_REFRESH_HOUR = int(os.environ.get("EVENING_REFRESH_HOUR", "16"))
+EVENING_REFRESH_MINUTES = float(os.environ.get("EVENING_REFRESH_MINUTES", "15"))
+EVENING_REFRESH_SECONDS = int(
+    os.environ.get("EVENING_REFRESH_SECONDS", str(int(EVENING_REFRESH_MINUTES * 60)))
+)
+
+
+def current_refresh_seconds():
+    """Rafraichissement effectif selon l'heure (Europe/Paris)."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    if now.hour >= EVENING_REFRESH_HOUR:
+        return EVENING_REFRESH_SECONDS
+    return REFRESH_SECONDS
 PORT = int(os.environ.get("PORT", "8765"))
 API_VERSION = "2024-10"
 
@@ -269,7 +285,7 @@ def refresh_cache():
 def background_refresher():
     while True:
         refresh_cache()
-        time.sleep(max(5, REFRESH_SECONDS))
+        time.sleep(max(5, current_refresh_seconds()))
 
 
 # --------------------------------------------------------------------
@@ -303,6 +319,7 @@ def format_date_fr(d):
 
 def render_html():
     today_label = format_date_fr(datetime.now(ZoneInfo(TIMEZONE)))
+    refresh_seconds = current_refresh_seconds()
     with _cache_lock:
         a_traiter = _cache["a_traiter"]
         precommandes = _cache["precommandes"]
@@ -390,7 +407,7 @@ def render_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
+<meta http-equiv="refresh" content="{refresh_seconds}">
 <title>Unipap's - Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
@@ -452,10 +469,10 @@ def render_html():
   @media (max-width: 1100px) {{ .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
   .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 22px; }}
-  .brand-logo {{ height: 260px; width: auto; margin-bottom: 10px; }}
+  .brand-logo {{ height: 150px; width: auto; margin-bottom: 10px; }}
   .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; }}
   @media (max-width: 700px) {{
-    .brand-logo {{ height: 140px; }}
+    .brand-logo {{ height: 90px; }}
     .brand-date {{ font-size: 19px; }}
   }}
 </style>
@@ -508,7 +525,7 @@ def render_html():
     </div>
   </div>
 
-  <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {REFRESH_SECONDS} sec)</div>
+  <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
 </div>
 </body>
 </html>"""
