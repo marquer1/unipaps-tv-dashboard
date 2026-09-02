@@ -222,6 +222,7 @@ def render_html():
 <html lang="fr">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_MINUTES * 60}">
 <title>Unipap's - Dashboard</title>
 <style>
@@ -231,7 +232,15 @@ def render_html():
     background: #f2f4f7; color: #1a1f29;
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }}
-  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }}
+  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }}
+  @media (max-width: 700px) {{
+    .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
+    .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }}
+    .carrier-row {{ grid-template-columns: 1fr 34px; grid-template-areas: "label count" "bar bar"; row-gap: 4px; }}
+    .carrier-label {{ grid-area: label; }}
+    .carrier-count {{ grid-area: count; }}
+    .carrier-bar-track {{ grid-area: bar; }}
+  }}
   .grid-top, .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
