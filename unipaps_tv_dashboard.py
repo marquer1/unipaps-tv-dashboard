@@ -42,7 +42,9 @@ INSTALLATION (sur le mini-PC branche a la TV)
 import os
 import time
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -74,6 +76,67 @@ CARRIERS = [
     ("🌍", "Lettre Suivie Internationale", "Lettre Suivie Internationale"),
     ("🌐", "Lettre Non Suivie Internationale", "Lettre Non Suivie Internationale"),
 ]
+
+# --------------------------------------------------------------------
+# Prevision "commandes a traiter d'ici 15h"
+# --------------------------------------------------------------------
+# Calculee a partir de deux exports Shopify Analytics ("Ventes totales au
+# fil du temps") sur la periode 16/03/2024 - 02/09/2026 :
+#   - repartition des commandes par heure de la journee (agregee, toutes
+#     dates confondues)
+#   - repartition des commandes par jour de la semaine (agregee, toutes
+#     heures confondues)
+# Les deux ne donnent pas le vrai croisement heure x jour (Shopify ne
+# l'exporte pas directement), donc on les combine par approximation :
+#   commandes attendues d'ici 15h
+#     = volume moyen du jour de la semaine
+#       x (part du volume journalier recue habituellement entre "maintenant"
+#          et 15h, d'apres la courbe horaire moyenne)
+TIMEZONE = os.environ.get("TZ_NAME", "Europe/Paris")
+PREDICTION_HOUR = int(os.environ.get("PREDICTION_HOUR", "15"))
+
+# Nombre de commandes par heure (index 0 = 00h-01h, ... 23 = 23h-00h),
+# agrege sur toute la periode.
+HOURLY_ORDERS = [
+    568, 204, 80, 47, 38, 59, 219, 598, 1162, 1844, 2070, 2130, 1989,
+    2234, 2371, 2126, 2100, 2268, 2442, 2616, 2749, 3222, 2817, 1527,
+]
+_HOURLY_TOTAL = sum(HOURLY_ORDERS)
+
+# Volume moyen de commandes par jour de la semaine (0 = dimanche ...
+# 6 = samedi, convention Shopify), calcule sur le nombre d'occurrences
+# de chaque jour entre le 16/03/2024 et le 02/09/2026.
+_WEEKDAY_TOTAL = [6335, 5634, 5453, 4655, 4284, 5123, 5996]
+_WEEKDAY_OCCURRENCES = [129, 129, 129, 129, 128, 128, 129]
+WEEKDAY_AVG_ORDERS = [t / n for t, n in zip(_WEEKDAY_TOTAL, _WEEKDAY_OCCURRENCES)]
+
+
+def _cumulative_pct(hour, minute):
+    """% cumule (0-100) du volume moyen d'une journee, recu entre 00h00
+    et l'heure:minute donnee."""
+    hour = max(0, min(24, hour))
+    done = sum(HOURLY_ORDERS[:hour])
+    if hour < 24:
+        done += HOURLY_ORDERS[hour] * (minute / 60)
+    return 100 * done / _HOURLY_TOTAL
+
+
+def compute_prediction(a_traiter):
+    """Renvoie (prediction_totale, commandes_attendues_en_plus) ou None
+    si l'heure de reference est deja depassee."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    shopify_weekday = (now.weekday() + 1) % 7  # lundi=0 -> dimanche=0
+    if now.hour >= PREDICTION_HOUR:
+        return None
+
+    pct_now = _cumulative_pct(now.hour, now.minute)
+    pct_target = _cumulative_pct(PREDICTION_HOUR, 0)
+    pct_remaining = max(0, pct_target - pct_now)
+
+    avg_day_volume = WEEKDAY_AVG_ORDERS[shopify_weekday]
+    expected_new = avg_day_volume * pct_remaining / 100
+    return a_traiter + round(expected_new), round(expected_new)
+
 
 GRAPHQL_QUERY = """
 query($query: String!, $cursor: String) {
@@ -204,6 +267,34 @@ def render_html():
     plateaux_precommandes = precommandes / COMMANDES_PAR_PLATEAU
     temps_precommandes = plateaux_precommandes * MINUTES_PAR_PLATEAU
 
+    prediction = compute_prediction(a_traiter)
+    if prediction:
+        pred_total, pred_new = prediction
+        prediction_card = f"""
+    <div class="card">
+      <div class="icon-box icon-blue">🔮</div>
+      <div>
+        <div class="stat-label">Prévision à {PREDICTION_HOUR}h</div>
+        <div class="stat-row">
+          <div class="stat-value blue">{pred_total}</div>
+          <div class="divider"></div>
+          <div>
+            <div class="stat-sub blue">+{pred_new}</div>
+            <div class="stat-sub-label">Attendues</div>
+          </div>
+        </div>
+      </div>
+    </div>"""
+    else:
+        prediction_card = f"""
+    <div class="card">
+      <div class="icon-box icon-blue">🔮</div>
+      <div>
+        <div class="stat-label">Prévision à {PREDICTION_HOUR}h</div>
+        <div class="stat-value blue" style="font-size:20px;">Heure dépassée</div>
+      </div>
+    </div>"""
+
     max_count = max([c["count"] for c in carriers.values()] + [1])
     carrier_rows = ""
     for emoji, label, tag in CARRIERS:
@@ -242,7 +333,8 @@ def render_html():
     .carrier-count {{ grid-area: count; }}
     .carrier-bar-track {{ grid-area: bar; }}
   }}
-  .grid-top, .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -256,14 +348,17 @@ def render_html():
   .icon-orange {{ background: #fdeee0; }}
   .icon-green {{ background: #e3f6ea; }}
   .icon-purple {{ background: #eee9fb; }}
+  .icon-blue {{ background: #e2eefc; }}
   .stat-label {{ font-size: 13px; letter-spacing: 0.05em; color: #8b95a5; font-weight: 700; text-transform: uppercase; margin-bottom: 2px; }}
   .stat-value {{ font-size: 32px; font-weight: 800; }}
   .stat-value.orange {{ color: #e8792b; }}
   .stat-value.green {{ color: #2fa860; }}
   .stat-value.purple {{ color: #6c4fd6; }}
+  .stat-value.blue {{ color: #2b7fe0; }}
   .stat-row {{ display: flex; align-items: baseline; gap: 12px; }}
   .stat-sub {{ display: flex; align-items: baseline; gap: 6px; font-size: 20px; font-weight: 700; color: #e8792b; }}
   .stat-sub.purple {{ color: #6c4fd6; }}
+  .stat-sub.blue {{ color: #2b7fe0; }}
   .stat-sub-label {{ font-size: 12px; color: #8b95a5; font-weight: 600; text-transform: uppercase; }}
   .divider {{ width: 1px; height: 36px; background: #e5e9f0; margin: 0 4px; }}
 
@@ -307,6 +402,7 @@ def render_html():
         <div class="stat-value green">{format_minutes(temps_a_traiter)}</div>
       </div>
     </div>
+    {prediction_card}
   </div>
 
   <div class="carriers-card">
