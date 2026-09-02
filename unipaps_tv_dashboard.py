@@ -452,10 +452,10 @@ def render_html():
   @media (max-width: 1100px) {{ .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
   .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 22px; }}
-  .brand-logo {{ height: 46px; width: auto; margin-bottom: 10px; }}
-  .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: capitalize; letter-spacing: 0.01em; }}
+  .brand-logo {{ height: 260px; width: auto; margin-bottom: 10px; }}
+  .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; }}
   @media (max-width: 700px) {{
-    .brand-logo {{ height: 34px; }}
+    .brand-logo {{ height: 140px; }}
     .brand-date {{ font-size: 19px; }}
   }}
 </style>
