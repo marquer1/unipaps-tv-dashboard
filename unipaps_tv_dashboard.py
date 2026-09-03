@@ -105,6 +105,9 @@ CARRIERS = [
     ("🌐", "Lettre Non Suivie Internationale", "Lettre Non Suivie Internationale"),
 ]
 
+# Libelles Gmail a detailler dans l'onglet SAV (nom exact du libelle Gmail)
+GMAIL_LABELS_SAV = ["Unipap's", "Wood&Chic", "Clemanto"]
+
 # --------------------------------------------------------------------
 # Prevision "commandes a traiter d'ici 15h"
 # --------------------------------------------------------------------
@@ -189,6 +192,7 @@ _cache = {
     "gmail_unread": None,
     "gmail_unread_24h": None,
     "gmail_unread_24h_senders": [],
+    "gmail_label_counts": {},
     "updated_at": None,
     "error": None,
 }
@@ -296,6 +300,26 @@ def get_gmail_unread_inbox():
     if access_token is None:
         return None
     return _count_gmail_threads(access_token, "in:inbox is:unread category:primary")
+
+
+def get_gmail_label_unread_counts(label_names):
+    """Nombre de conversations non lues (threadsUnread) pour chaque libelle
+    Gmail demande, dans l'ordre. Renvoie {nom: nombre} ou {} si indisponible."""
+    access_token = get_gmail_access_token()
+    if access_token is None:
+        return {}
+    resp = requests.get(
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    by_name = {lbl.get("name"): lbl for lbl in resp.json().get("labels", [])}
+    counts = {}
+    for name in label_names:
+        lbl = by_name.get(name)
+        counts[name] = lbl.get("threadsUnread", 0) if lbl else None
+    return counts
 
 
 def _parse_sender_name(from_header):
@@ -444,6 +468,12 @@ def refresh_cache():
             gmail_unread_24h_senders = []
             print(f"[Gmail] Erreur lors de la recuperation des mails +24h : {gmail_exc}", flush=True)
 
+        try:
+            gmail_label_counts = get_gmail_label_unread_counts(GMAIL_LABELS_SAV)
+        except Exception as gmail_exc:  # noqa: BLE001
+            gmail_label_counts = {}
+            print(f"[Gmail] Erreur lors de la recuperation des libelles : {gmail_exc}", flush=True)
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
@@ -452,6 +482,7 @@ def refresh_cache():
             _cache["gmail_unread"] = gmail_unread
             _cache["gmail_unread_24h"] = gmail_unread_24h
             _cache["gmail_unread_24h_senders"] = gmail_unread_24h_senders
+            _cache["gmail_label_counts"] = gmail_label_counts
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -506,6 +537,7 @@ def render_html():
         gmail_unread = _cache["gmail_unread"]
         gmail_unread_24h = _cache["gmail_unread_24h"]
         gmail_unread_24h_senders = list(_cache["gmail_unread_24h_senders"])
+        gmail_label_counts = dict(_cache["gmail_label_counts"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -612,6 +644,31 @@ def render_html():
     else:
         gmail_24h_senders_card = ""
 
+    gmail_label_max = max([c for c in gmail_label_counts.values() if c] + [1])
+    gmail_label_rows = ""
+    for name in GMAIL_LABELS_SAV:
+        count = gmail_label_counts.get(name)
+        if count is None:
+            gmail_label_rows += f"""
+        <div class="carrier-row">
+          <div class="carrier-label"><span class="carrier-emoji">📧</span>{name}</div>
+          <div class="carrier-bar-track"></div>
+          <div class="carrier-count">—</div>
+        </div>"""
+        else:
+            pct = int(100 * count / gmail_label_max) if gmail_label_max else 0
+            gmail_label_rows += f"""
+        <div class="carrier-row">
+          <div class="carrier-label"><span class="carrier-emoji">📧</span>{name}</div>
+          <div class="carrier-bar-track"><div class="carrier-bar-fill" style="width:{pct}%"></div></div>
+          <div class="carrier-count">{count}</div>
+        </div>"""
+    gmail_labels_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">Mails non lus par boîte <span>(toute la boîte de réception)</span></div>
+      {gmail_label_rows}
+    </div>"""
+
     prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
         pred_total, pred_new = prediction
@@ -689,14 +746,22 @@ def render_html():
   .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }}
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
-    .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }}
+    .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }}
     .carrier-row {{ grid-template-columns: 1fr 34px; grid-template-areas: "label count" "bar bar"; row-gap: 4px; }}
     .carrier-label {{ grid-area: label; }}
     .carrier-count {{ grid-area: count; }}
     .carrier-bar-track {{ grid-area: bar; }}
   }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
-  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+
+  .tabs {{ display: flex; gap: 10px; margin-bottom: 18px; justify-content: center; }}
+  .tab-btn {{
+    font-family: inherit; font-size: 16px; font-weight: 700; cursor: pointer;
+    background: #ffffff; color: #8b95a5; border: 1px solid #e5e9f0;
+    border-radius: 12px; padding: 10px 22px;
+  }}
+  .tab-btn-active {{ background: #1a1f29; color: #ffffff; border-color: #1a1f29; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -740,7 +805,7 @@ def render_html():
 
   .updated {{ text-align: center; font-size: 13px; color: #8b95a5; margin-top: 2px; }}
   .error {{ background: #fbe0e0; color: #a52323; text-align: center; padding: 10px; font-size: 15px; border-radius: 10px; margin-bottom: 12px; }}
-  @media (max-width: 1100px) {{ .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
+  @media (max-width: 1100px) {{ .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
   .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }}
   .brand-logo {{ height: 150px; width: auto; margin-bottom: -18px; display: block; }}
@@ -758,53 +823,81 @@ def render_html():
     <div class="brand-date">{today_label}</div>
   </div>
   {error_banner}
-  <div class="grid-top">
-    {a_traiter_card}
-    <div class="card">
-      <div class="icon-box icon-green">⏱️</div>
-      <div>
-        <div class="stat-label">Temps de traitement estimé</div>
-        <div class="stat-value green">{format_minutes(temps_a_traiter)}</div>
+
+  <div class="tabs">
+    <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes')">📦 Commandes</button>
+    <button class="tab-btn" data-tab="sav" onclick="showTab('sav')">📧 SAV</button>
+  </div>
+
+  <div id="tab-commandes" class="tab-panel">
+    <div class="grid-top">
+      {a_traiter_card}
+      <div class="card">
+        <div class="icon-box icon-green">⏱️</div>
+        <div>
+          <div class="stat-label">Temps de traitement estimé</div>
+          <div class="stat-value green">{format_minutes(temps_a_traiter)}</div>
+        </div>
       </div>
+      {prediction_card}
+      {prediction_temps_card}
     </div>
-    {prediction_card}
-    {prediction_temps_card}
-  </div>
 
-  <div class="carriers-card">
-    <div class="carriers-title">Commandes par transporteur <span>(à traiter uniquement)</span></div>
-    {carrier_rows}
-  </div>
+    <div class="carriers-card">
+      <div class="carriers-title">Commandes par transporteur <span>(à traiter uniquement)</span></div>
+      {carrier_rows}
+    </div>
 
-  <div class="grid-bottom">
-    <div class="card">
-      <div class="icon-box icon-purple">🕐</div>
-      <div>
-        <div class="stat-label">Précommandes en cours</div>
-        <div class="stat-row">
-          <div class="stat-value purple">{precommandes}</div>
-          <div class="divider"></div>
-          <div>
-            <div class="stat-sub purple">🛒 {format_plateaux(precommandes)}</div>
-            <div class="stat-sub-label">Plateaux</div>
+    <div class="grid-bottom-2">
+      <div class="card">
+        <div class="icon-box icon-purple">🕐</div>
+        <div>
+          <div class="stat-label">Précommandes en cours</div>
+          <div class="stat-row">
+            <div class="stat-value purple">{precommandes}</div>
+            <div class="divider"></div>
+            <div>
+              <div class="stat-sub purple">🛒 {format_plateaux(precommandes)}</div>
+              <div class="stat-sub-label">Plateaux</div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-    <div class="card">
-      <div class="icon-box icon-purple">⏱️</div>
-      <div>
-        <div class="stat-label">Temps de traitement précommandes</div>
-        <div class="stat-value purple">{format_minutes(temps_precommandes)}</div>
+      <div class="card">
+        <div class="icon-box icon-purple">⏱️</div>
+        <div>
+          <div class="stat-label">Temps de traitement précommandes</div>
+          <div class="stat-value purple">{format_minutes(temps_precommandes)}</div>
+        </div>
       </div>
     </div>
-    {gmail_card}
-    {gmail_24h_card}
   </div>
-  {gmail_24h_senders_card}
+
+  <div id="tab-sav" class="tab-panel" hidden>
+    <div class="grid-bottom-2">
+      {gmail_card}
+      {gmail_24h_card}
+    </div>
+    {gmail_labels_card}
+    {gmail_24h_senders_card}
+  </div>
 
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
 </div>
+<script>
+  function showTab(name) {{
+    document.querySelectorAll('.tab-panel').forEach(function(el) {{ el.hidden = true; }});
+    document.querySelectorAll('.tab-btn').forEach(function(el) {{ el.classList.remove('tab-btn-active'); }});
+    document.getElementById('tab-' + name).hidden = false;
+    document.querySelector('.tab-btn[data-tab="' + name + '"]').classList.add('tab-btn-active');
+    try {{ localStorage.setItem('unipaps_active_tab', name); }} catch (e) {{}}
+  }}
+  (function() {{
+    var saved = 'commandes';
+    try {{ saved = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
+    showTab(saved);
+  }})();
+</script>
 </body>
 </html>"""
 
