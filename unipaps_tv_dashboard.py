@@ -283,12 +283,20 @@ def get_gmail_unread_older_than_24h():
     if access_token is None:
         return None
 
+    # "before:<timestamp Unix>" permet une precision a la seconde (contrairement
+    # a "older_than:1d", dont le comportement exact - jour calendaire ou
+    # fenetre glissante - n'est pas documente par Google). Ainsi un mail
+    # recu a 15h devient "+24h" a 15h precises le lendemain, pas a minuit.
+    cutoff_epoch = int(
+        (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(hours=24)).timestamp()
+    )
+
     headers = {"Authorization": f"Bearer {access_token}"}
     total = 0
     page_token = None
     while True:
         params = {
-            "q": "in:inbox is:unread older_than:1d",
+            "q": f"in:inbox is:unread before:{cutoff_epoch}",
             "maxResults": 500,
         }
         if page_token:
