@@ -358,8 +358,22 @@ def get_gmail_unread_older_than_24h():
                 )
                 t_resp.raise_for_status()
                 messages = t_resp.json().get("messages", [])
-                if messages:
-                    payload_headers = messages[-1].get("payload", {}).get("headers", [])
+
+                # On cible precisement le message NON LU et vieux de plus de
+                # 24h qui a fait matcher la conversation (le plus recent
+                # d'entre eux s'il y en a plusieurs) - pas simplement le
+                # dernier message du fil, qui peut etre une reponse deja
+                # envoyee par nous ("Support Unipap's").
+                cutoff_ms = cutoff_epoch * 1000
+                candidates = [
+                    m for m in messages
+                    if "UNREAD" in m.get("labelIds", [])
+                    and int(m.get("internalDate", "0")) < cutoff_ms
+                ]
+                target = candidates[-1] if candidates else (messages[-1] if messages else None)
+
+                if target:
+                    payload_headers = target.get("payload", {}).get("headers", [])
                     from_header = next(
                         (h["value"] for h in payload_headers if h["name"] == "From"), None
                     )
