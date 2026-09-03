@@ -1208,6 +1208,7 @@ def render_html():
 <script>
   var _autoRotateTimer = null;
   var _tabOrder = ['commandes', 'sav', 'ads'];
+  var ROTATE_MS = 10000;
 
   function showTab(name, manual) {{
     document.querySelectorAll('.tab-panel').forEach(function(el) {{ el.hidden = true; }});
@@ -1221,24 +1222,33 @@ def render_html():
     }}
   }}
 
+  // Onglet "du moment" calcule a partir de l'heure reelle (et non d'un
+  // minuteur qui redemarre a chaque rechargement de page) : ainsi la
+  // rotation continue meme si la page se recharge toutes les 2 secondes
+  // (rafraichissement auto du dashboard), bien avant les 10 secondes.
+  function currentAutoTab() {{
+    var idx = Math.floor(Date.now() / ROTATE_MS) % _tabOrder.length;
+    return _tabOrder[idx];
+  }}
+
   function startAutoRotate() {{
     _autoRotateTimer = setInterval(function() {{
-      var current = 'commandes';
-      try {{ current = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
-      var idx = _tabOrder.indexOf(current);
-      if (idx === -1) {{ idx = 0; }}
-      var next = _tabOrder[(idx + 1) % _tabOrder.length];
-      showTab(next);
-    }}, 10000);
+      showTab(currentAutoTab());
+    }}, 1000);
   }}
 
   (function() {{
-    var saved = 'commandes';
-    try {{ saved = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
-    showTab(saved);
     var stopped = false;
     try {{ stopped = localStorage.getItem('unipaps_auto_rotate_stopped') === '1'; }} catch (e) {{}}
-    if (!stopped) {{ startAutoRotate(); }}
+
+    if (stopped) {{
+      var saved = 'commandes';
+      try {{ saved = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
+      showTab(saved);
+    }} else {{
+      showTab(currentAutoTab());
+      startAutoRotate();
+    }}
   }})();
 </script>
 </body>
