@@ -132,6 +132,22 @@ COUNTRY_GROUPS = {
 # autres pays n'affichent que le cumul 30 jours).
 COUNTRY_GROUPS_DETAILED = ["FR"]
 
+# Libelle affiche (nom complet francais + drapeau) pour chaque indicatif.
+COUNTRY_DISPLAY_NAMES = {
+    "FR": "🇫🇷 France (+ Belgique)",
+    "DE": "🇩🇪 Allemagne",
+    "ES": "🇪🇸 Espagne",
+    "IT": "🇮🇹 Italie",
+    "NL": "🇳🇱 Pays-Bas",
+    "SE": "🇸🇪 Suède",
+    "PT": "🇵🇹 Portugal",
+    "AT": "🇦🇹 Autriche",
+    "DK": "🇩🇰 Danemark",
+    "FI": "🇫🇮 Finlande",
+    "PL": "🇵🇱 Pologne",
+    "CZ": "🇨🇿 Tchéquie",
+}
+
 # --------------------------------------------------------------------
 # Prevision "commandes a traiter d'ici 15h"
 # --------------------------------------------------------------------
@@ -831,11 +847,12 @@ def render_html():
 
     ads_rows = ""
     for label in ["FR"] + [c for c in COUNTRY_GROUPS if c != "FR"]:
+        display_name = COUNTRY_DISPLAY_NAMES.get(label, label)
         entry = revenue_by_country.get(label)
         if entry is None:
             ads_rows += f"""
         <tr>
-          <td>{label}</td>
+          <td>{display_name}</td>
           <td colspan="4" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
@@ -849,7 +866,7 @@ def render_html():
             detail_cols = "<td>—</td><td>—</td>"
         ads_rows += f"""
         <tr>
-          <td>{label}</td>
+          <td>{display_name}</td>
           <td>{fmt_eur(ca_30j)}</td>
           {detail_cols}
           <td class="ads-indispo">En attente API Ads</td>
