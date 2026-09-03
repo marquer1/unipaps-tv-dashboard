@@ -109,6 +109,30 @@ CARRIERS = [
 GMAIL_LABELS_SAV = ["Unipap's", "Wood&Chic", "Clemanto"]
 
 # --------------------------------------------------------------------
+# CA Shopify / depenses Google Ads par pays
+# --------------------------------------------------------------------
+# Cle = indicatif utilise en debut de titre des campagnes Google Ads.
+# Valeur = liste des codes pays (ISO) Shopify (adresse de livraison) a
+# regrouper sous cet indicatif. "FR" regroupe France + Belgique.
+COUNTRY_GROUPS = {
+    "FR": ["FR", "BE"],
+    "DE": ["DE"],
+    "ES": ["ES"],
+    "IT": ["IT"],
+    "NL": ["NL"],
+    "SE": ["SE"],
+    "PT": ["PT"],
+    "AT": ["AT"],
+    "DK": ["DK"],
+    "FI": ["FI"],
+    "PL": ["PL"],
+    "CZ": ["CZ"],
+}
+# Groupe(s) pour lesquels on veut aussi le detail 7 jours + veille (les
+# autres pays n'affichent que le cumul 30 jours).
+COUNTRY_GROUPS_DETAILED = ["FR"]
+
+# --------------------------------------------------------------------
 # Prevision "commandes a traiter d'ici 15h"
 # --------------------------------------------------------------------
 # Principe : on regarde combien de commandes sont deja arrivees
@@ -193,6 +217,7 @@ _cache = {
     "gmail_unread_24h": None,
     "gmail_unread_24h_senders": [],
     "gmail_label_counts": {},
+    "revenue_by_country": {},
     "updated_at": None,
     "error": None,
 }
@@ -239,6 +264,102 @@ def count_orders(token, search_query):
         else:
             break
     return total
+
+
+ORDERS_REVENUE_QUERY = """
+query($query: String!, $cursor: String) {
+  orders(first: 250, after: $cursor, query: $query) {
+    edges {
+      cursor
+      node {
+        createdAt
+        currentTotalPriceSet { shopMoney { amount } }
+        shippingAddress { countryCodeV2 }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def get_shopify_orders_last_30j(token):
+    """Recupere les commandes des 30 derniers jours (peu importe le statut,
+    hors annulees) avec leur montant TTC (deduit des remboursements) et le
+    pays de livraison. Renvoie une liste de dicts
+    {created_at: datetime, country: str|None, amount: float}."""
+    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    start = now - timedelta(days=30)
+    search_query = f"created_at:>='{start.isoformat()}' -status:cancelled"
+
+    orders = []
+    cursor = None
+    while True:
+        payload = {
+            "query": ORDERS_REVENUE_QUERY,
+            "variables": {"query": search_query, "cursor": cursor},
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data:
+            raise RuntimeError(str(data["errors"]))
+        block = data["data"]["orders"]
+        for edge in block["edges"]:
+            node = edge["node"]
+            try:
+                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+            except (TypeError, ValueError):
+                continue
+            shipping = node.get("shippingAddress") or {}
+            country = shipping.get("countryCodeV2")
+            amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
+            orders.append({"created_at": created_at, "country": country, "amount": amount})
+        if block["pageInfo"]["hasNextPage"]:
+            cursor = block["pageInfo"]["endCursor"]
+        else:
+            break
+    return orders
+
+
+def compute_revenue_by_country_group(orders):
+    """A partir de la liste d'orders (get_shopify_orders_last_30j), calcule
+    pour chaque groupe de pays (COUNTRY_GROUPS) le CA TTC sur 30 jours, et
+    pour les groupes de COUNTRY_GROUPS_DETAILED, egalement sur 7 jours et
+    sur la journee d'hier (calendaire, fuseau TIMEZONE). Renvoie
+    {indicatif: {"30j": float, "7j": float|None, "veille": float|None}}."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
+    yesterday_date = (now - timedelta(days=1)).date()
+
+    result = {}
+    for label, countries in COUNTRY_GROUPS.items():
+        countries_set = set(countries)
+        total_30j = 0.0
+        total_7j = 0.0
+        total_veille = 0.0
+        for o in orders:
+            if o["country"] not in countries_set:
+                continue
+            total_30j += o["amount"]
+            if o["created_at"] >= since_7j:
+                total_7j += o["amount"]
+            if o["created_at"].date() == yesterday_date:
+                total_veille += o["amount"]
+        entry = {"30j": round(total_30j, 2)}
+        if label in COUNTRY_GROUPS_DETAILED:
+            entry["7j"] = round(total_7j, 2)
+            entry["veille"] = round(total_veille, 2)
+        else:
+            entry["7j"] = None
+            entry["veille"] = None
+        result[label] = entry
+    return result
 
 
 def get_gmail_access_token():
@@ -499,6 +620,15 @@ def refresh_cache():
             gmail_label_counts = {}
             print(f"[Gmail] Erreur lors de la recuperation des libelles : {gmail_exc}", flush=True)
 
+        # CA Shopify par pays : isole dans son propre try/except, comme
+        # pour Gmail, pour ne pas casser le reste du dashboard.
+        try:
+            orders_30j = get_shopify_orders_last_30j(token)
+            revenue_by_country = compute_revenue_by_country_group(orders_30j)
+        except Exception as revenue_exc:  # noqa: BLE001
+            revenue_by_country = {}
+            print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
@@ -508,6 +638,7 @@ def refresh_cache():
             _cache["gmail_unread_24h"] = gmail_unread_24h
             _cache["gmail_unread_24h_senders"] = gmail_unread_24h_senders
             _cache["gmail_label_counts"] = gmail_label_counts
+            _cache["revenue_by_country"] = revenue_by_country
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -563,6 +694,7 @@ def render_html():
         gmail_unread_24h = _cache["gmail_unread_24h"]
         gmail_unread_24h_senders = list(_cache["gmail_unread_24h_senders"])
         gmail_label_counts = dict(_cache["gmail_label_counts"])
+        revenue_by_country = dict(_cache["revenue_by_country"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -694,6 +826,58 @@ def render_html():
       {gmail_label_rows}
     </div>"""
 
+    def fmt_eur(value):
+        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
+
+    ads_rows = ""
+    for label in ["FR"] + [c for c in COUNTRY_GROUPS if c != "FR"]:
+        entry = revenue_by_country.get(label)
+        if entry is None:
+            ads_rows += f"""
+        <tr>
+          <td>{label}</td>
+          <td colspan="4" class="ads-indispo">Indisponible</td>
+        </tr>"""
+            continue
+        ca_30j = entry.get("30j")
+        ca_7j = entry.get("7j")
+        ca_veille = entry.get("veille")
+        detail_cols = ""
+        if label in COUNTRY_GROUPS_DETAILED:
+            detail_cols = f"<td>{fmt_eur(ca_7j)}</td><td>{fmt_eur(ca_veille)}</td>"
+        else:
+            detail_cols = "<td>—</td><td>—</td>"
+        ads_rows += f"""
+        <tr>
+          <td>{label}</td>
+          <td>{fmt_eur(ca_30j)}</td>
+          {detail_cols}
+          <td class="ads-indispo">En attente API Ads</td>
+          <td class="ads-indispo">—</td>
+        </tr>"""
+
+    ads_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">CA Shopify TTC &amp; dépenses Google Ads par pays</div>
+      <div style="overflow-x:auto;">
+      <table class="ads-table">
+        <thead>
+          <tr>
+            <th>Pays</th>
+            <th>CA 30j</th>
+            <th>CA 7j</th>
+            <th>CA veille</th>
+            <th>Dépenses Ads</th>
+            <th>Ratio CA/Ads</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ads_rows}
+        </tbody>
+      </table>
+      </div>
+    </div>"""
+
     prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
         pred_total, pred_new = prediction
@@ -787,6 +971,12 @@ def render_html():
     border-radius: 12px; padding: 10px 22px;
   }}
   .tab-btn-active {{ background: #1a1f29; color: #ffffff; border-color: #1a1f29; }}
+
+  .ads-table {{ width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }}
+  .ads-table th {{ text-align: left; font-size: 12px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 8px 10px; border-bottom: 2px solid #e5e9f0; }}
+  .ads-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
+  .ads-table tr:last-child td {{ border-bottom: none; }}
+  .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -852,6 +1042,7 @@ def render_html():
   <div class="tabs">
     <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes')">📦 Commandes</button>
     <button class="tab-btn" data-tab="sav" onclick="showTab('sav')">📧 SAV</button>
+    <button class="tab-btn" data-tab="ads" onclick="showTab('ads')">📊 Ads</button>
   </div>
 
   <div id="tab-commandes" class="tab-panel">
@@ -905,6 +1096,10 @@ def render_html():
     </div>
     {gmail_labels_card}
     {gmail_24h_senders_card}
+  </div>
+
+  <div id="tab-ads" class="tab-panel" hidden>
+    {ads_card}
   </div>
 
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
