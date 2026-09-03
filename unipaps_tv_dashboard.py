@@ -292,6 +292,33 @@ def _count_gmail_threads(access_token, query):
     return total
 
 
+def _count_gmail_threads_by_message(access_token, query):
+    """Comme _count_gmail_threads, mais interroge au niveau MESSAGE (fiable)
+    plutot qu'au niveau fil de discussion (dont la recherche "is:unread"
+    peut renvoyer des resultats perimes), puis deduplique par conversation."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    thread_ids = set()
+    page_token = None
+    while True:
+        params = {"q": query, "maxResults": 500}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for m in data.get("messages", []):
+            thread_ids.add(m.get("threadId") or m["id"])
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return len(thread_ids)
+
+
 def get_gmail_unread_inbox():
     """Nombre de conversations non lues dans l'onglet Principale de la
     boite de reception (comme affiche par Gmail dans le menu de gauche),
@@ -302,41 +329,19 @@ def get_gmail_unread_inbox():
     return _count_gmail_threads(access_token, "in:inbox is:unread category:primary")
 
 
-def get_gmail_label_unread_counts(label_names):
-    """Nombre de conversations non lues (threadsUnread) pour chaque libelle
-    Gmail demande, dans l'ordre. Renvoie {nom: nombre} ou {} si indisponible.
-
-    "labels.list" ne renvoie PAS les compteurs (messagesUnread,
-    threadsUnread, ...) pour les libelles utilisateur - seul "labels.get"
-    (appele par libelle) les fournit. On liste d'abord pour retrouver les
-    ID correspondant aux noms demandes, puis on interroge chacun."""
+def get_gmail_label_inbox_unread_counts(label_names):
+    """Nombre de conversations non lues dans la boite de reception (onglet
+    Principale) pour chaque libelle demande - meme perimetre que "Mails a
+    traiter", contrairement au total historique du libelle. Renvoie
+    {nom: nombre} ou {} si indisponible."""
     access_token = get_gmail_access_token()
     if access_token is None:
         return {}
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    resp = requests.get(
-        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        headers=headers,
-        timeout=20,
-    )
-    resp.raise_for_status()
-    id_by_name = {lbl.get("name"): lbl.get("id") for lbl in resp.json().get("labels", [])}
-
     counts = {}
     for name in label_names:
-        label_id = id_by_name.get(name)
-        if not label_id:
-            counts[name] = None
-            continue
         try:
-            lbl_resp = requests.get(
-                f"https://gmail.googleapis.com/gmail/v1/users/me/labels/{label_id}",
-                headers=headers,
-                timeout=20,
-            )
-            lbl_resp.raise_for_status()
-            counts[name] = lbl_resp.json().get("threadsUnread", 0)
+            query = f'in:inbox is:unread category:primary label:"{name}"'
+            counts[name] = _count_gmail_threads_by_message(access_token, query)
         except Exception:  # noqa: BLE001
             counts[name] = None
     return counts
@@ -489,7 +494,7 @@ def refresh_cache():
             print(f"[Gmail] Erreur lors de la recuperation des mails +24h : {gmail_exc}", flush=True)
 
         try:
-            gmail_label_counts = get_gmail_label_unread_counts(GMAIL_LABELS_SAV)
+            gmail_label_counts = get_gmail_label_inbox_unread_counts(GMAIL_LABELS_SAV)
         except Exception as gmail_exc:  # noqa: BLE001
             gmail_label_counts = {}
             print(f"[Gmail] Erreur lors de la recuperation des libelles : {gmail_exc}", flush=True)
