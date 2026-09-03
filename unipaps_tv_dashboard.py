@@ -34,6 +34,9 @@ INSTALLATION (sur le mini-PC branche a la TV)
        export REFRESH_MINUTES=15          # optionnel
        export PORT=8765                   # optionnel
        export MINUTES_PER_PLATEAU=45      # optionnel
+       export GOOGLE_CLIENT_ID="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"       # optionnel (mails a traiter)
+       export GOOGLE_CLIENT_SECRET="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # optionnel
+       export GOOGLE_REFRESH_TOKEN="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # optionnel
 5) python3 unipaps_tv_dashboard.py
 6) Navigateur en plein ecran sur http://localhost:8765
 ------------------------------------------------------------------
@@ -56,6 +59,11 @@ LOGO_B64 = "iVBORw0KGgoAAAANSUhEUgAAEEcAAAaDCAYAAAAS7/dMAAAACXBIWXMAAC4jAAAuIwF4
 SHOP = os.environ.get("SHOPIFY_STORE", "noeudspapillon.myshopify.com")
 CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "REMPLACE_MOI_client_id")
 CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_secret")
+
+# Gmail (mails non lus dans la boite de reception)
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
 REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
 
@@ -178,6 +186,7 @@ _cache = {
     "precommandes": 0,
     "carriers": {},
     "commandes_du_jour": 0,
+    "gmail_unread": None,
     "updated_at": None,
     "error": None,
 }
@@ -226,6 +235,32 @@ def count_orders(token, search_query):
     return total
 
 
+def get_gmail_unread_inbox():
+    """Nombre de mails non lus dans la boite de reception (INBOX)."""
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
+        return None
+    token_resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "refresh_token": GOOGLE_REFRESH_TOKEN,
+            "grant_type": "refresh_token",
+        },
+        timeout=20,
+    )
+    token_resp.raise_for_status()
+    access_token = token_resp.json()["access_token"]
+
+    resp = requests.get(
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels/INBOX",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json().get("messagesUnread", 0)
+
+
 def refresh_cache():
     try:
         token = get_access_token()
@@ -269,11 +304,19 @@ def refresh_cache():
 
         commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
 
+        # Gmail : isole dans son propre try/except pour ne pas casser
+        # le reste du dashboard si l'autorisation Google expire ou echoue.
+        try:
+            gmail_unread = get_gmail_unread_inbox()
+        except Exception:  # noqa: BLE001
+            gmail_unread = None
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
             _cache["carriers"] = carriers
             _cache["commandes_du_jour"] = commandes_du_jour
+            _cache["gmail_unread"] = gmail_unread
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -325,6 +368,7 @@ def render_html():
         precommandes = _cache["precommandes"]
         carriers = dict(_cache["carriers"])
         commandes_du_jour = _cache["commandes_du_jour"]
+        gmail_unread = _cache["gmail_unread"]
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -356,6 +400,34 @@ def render_html():
             <div class="stat-sub-label">Plateaux</div>
           </div>
         </div>
+      </div>
+    </div>"""
+
+    if gmail_unread is None:
+        gmail_card = """
+    <div class="card">
+      <div class="icon-box icon-purple">📧</div>
+      <div>
+        <div class="stat-label">Mails à traiter</div>
+        <div class="stat-value purple" style="font-size:18px;">Indisponible</div>
+      </div>
+    </div>"""
+    elif gmail_unread == 0:
+        gmail_card = f"""
+    <div class="card">
+      <div class="icon-box icon-green">✅</div>
+      <div>
+        <div class="stat-label">Mails à traiter</div>
+        <div class="stat-value green" style="font-size:26px;">{SUCCESS_MESSAGE}</div>
+      </div>
+    </div>"""
+    else:
+        gmail_card = f"""
+    <div class="card">
+      <div class="icon-box icon-purple">📧</div>
+      <div>
+        <div class="stat-label">Mails à traiter</div>
+        <div class="stat-value purple">{gmail_unread}</div>
       </div>
     </div>"""
 
@@ -443,7 +515,7 @@ def render_html():
     .carrier-bar-track {{ grid-area: bar; }}
   }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
-  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -541,6 +613,7 @@ def render_html():
         <div class="stat-value purple">{format_minutes(temps_precommandes)}</div>
       </div>
     </div>
+    {gmail_card}
   </div>
 
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
