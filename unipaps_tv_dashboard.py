@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unipap's - Dashboard TV
+A2C Digital - Dashboard TV
 =======================
 
 Reproduit le dashboard "commandes a traiter" en grand format pour une TV :
@@ -1138,7 +1138,7 @@ def render_html():
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{refresh_seconds}">
-<title>Unipap's - Dashboard</title>
+<title>A2C Digital - Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
   html, body {{
