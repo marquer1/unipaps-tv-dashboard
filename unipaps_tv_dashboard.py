@@ -60,6 +60,24 @@ SHOP = os.environ.get("SHOPIFY_STORE", "noeudspapillon.myshopify.com")
 CLIENT_ID = os.environ.get("SHOPIFY_CLIENT_ID", "REMPLACE_MOI_client_id")
 CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_secret")
 
+# Boutiques Shopify additionnelles dont les "commandes a traiter" (et
+# precommandes, transporteurs, prevision) doivent etre additionnees a
+# celles d'Unipap's dans l'onglet Commandes. Unipap's (SHOPIFY_STORE /
+# SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET ci-dessus) est toujours la
+# boutique n°1 ; on ajoute jusqu'a 2 boutiques de plus via des variables
+# suffixees _2 et _3 (meme principe que pour la boutique n°1) :
+#   SHOPIFY_STORE_2 / SHOPIFY_CLIENT_ID_2 / SHOPIFY_CLIENT_SECRET_2
+#   SHOPIFY_STORE_3 / SHOPIFY_CLIENT_ID_3 / SHOPIFY_CLIENT_SECRET_3
+# Une boutique dont les 3 variables ne sont pas toutes renseignees est
+# simplement ignoree (pas d'erreur).
+SHOPIFY_STORES = [{"shop": SHOP, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}]
+for _i in (2, 3):
+    _shop = os.environ.get(f"SHOPIFY_STORE_{_i}", "").strip()
+    _cid = os.environ.get(f"SHOPIFY_CLIENT_ID_{_i}", "").strip()
+    _csecret = os.environ.get(f"SHOPIFY_CLIENT_SECRET_{_i}", "").strip()
+    if _shop and _cid and _csecret:
+        SHOPIFY_STORES.append({"shop": _shop, "client_id": _cid, "client_secret": _csecret})
+
 # Gmail (mails non lus dans la boite de reception)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
@@ -256,8 +274,8 @@ def get_access_token():
     return resp.json()["access_token"]
 
 
-def count_orders(token, search_query):
-    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+def count_orders(token, search_query, shop=None):
+    url = f"https://{shop or SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
         "Content-Type": "application/json",
@@ -281,6 +299,23 @@ def count_orders(token, search_query):
         else:
             break
     return total
+
+
+def get_access_token_for(store):
+    """Comme get_access_token, mais pour une boutique quelconque de
+    SHOPIFY_STORES (dict {shop, client_id, client_secret})."""
+    url = f"https://{store['shop']}/admin/oauth/access_token"
+    resp = requests.post(
+        url,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": store["client_id"],
+            "client_secret": store["client_secret"],
+        },
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
 
 ORDERS_REVENUE_QUERY = """
@@ -626,15 +661,31 @@ def refresh_cache():
             ).isoformat()
             a_traiter_filter += f" created_at:<'{cutoff_15h}'"
 
-        a_traiter = count_orders(token, a_traiter_filter)
-        precommandes = count_orders(token, 'status:"open" tag:"Précommande"')
-
-        carriers = {}
-        for emoji, label, tag in CARRIERS:
-            q = f'{a_traiter_filter} tag:"{tag}"'
-            carriers[label] = {"emoji": emoji, "count": count_orders(token, q)}
-
-        commandes_du_jour = count_orders(token, f'created_at:>=\'{today}\'')
+        # "Commandes a traiter" (+ precommandes, transporteurs, prevision) :
+        # on additionne les resultats de toutes les boutiques configurees
+        # dans SHOPIFY_STORES (Unipap's + boutiques supplementaires). Une
+        # boutique en erreur (jeton invalide, etc.) est ignoree pour ne pas
+        # casser le reste du dashboard, avec un log pour le diagnostic.
+        a_traiter = 0
+        precommandes = 0
+        commandes_du_jour = 0
+        carriers = {label: {"emoji": emoji, "count": 0} for emoji, label, _tag in CARRIERS}
+        for store in SHOPIFY_STORES:
+            try:
+                store_token = get_access_token_for(store)
+                shop_name = store["shop"]
+                a_traiter += count_orders(store_token, a_traiter_filter, shop=shop_name)
+                precommandes += count_orders(
+                    store_token, 'status:"open" tag:"Précommande"', shop=shop_name
+                )
+                for emoji, label, tag in CARRIERS:
+                    q = f'{a_traiter_filter} tag:"{tag}"'
+                    carriers[label]["count"] += count_orders(store_token, q, shop=shop_name)
+                commandes_du_jour += count_orders(
+                    store_token, f'created_at:>=\'{today}\'', shop=shop_name
+                )
+            except Exception as store_exc:  # noqa: BLE001
+                print(f"[Shopify] Erreur boutique {store['shop']} : {store_exc}", flush=True)
 
         # Gmail : isole dans son propre try/except pour ne pas casser
         # le reste du dashboard si l'autorisation Google expire ou echoue.
