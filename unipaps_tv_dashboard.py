@@ -683,7 +683,9 @@ def refresh_cache():
                 shop_name = store["shop"]
                 a_traiter += count_orders(store_token, a_traiter_filter, shop=shop_name)
                 precommandes += count_orders(
-                    store_token, 'status:"open" tag:"Précommande"', shop=shop_name
+                    store_token,
+                    'status:"open" fulfillment_status:"on_hold" tag:"Précommande"',
+                    shop=shop_name,
                 )
                 for emoji, label, tag in CARRIERS:
                     q = f'{a_traiter_filter} tag:"{tag}"'
