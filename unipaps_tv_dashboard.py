@@ -262,46 +262,14 @@ def get_gmail_access_token():
     return token_resp.json()["access_token"]
 
 
-def get_gmail_unread_inbox():
-    """Nombre de conversations non lues dans la boite de reception (INBOX),
-    comme affiche par Gmail (et non le nombre de mails individuels)."""
-    access_token = get_gmail_access_token()
-    if access_token is None:
-        return None
-
-    resp = requests.get(
-        "https://gmail.googleapis.com/gmail/v1/users/me/labels/INBOX",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=20,
-    )
-    resp.raise_for_status()
-    return resp.json().get("threadsUnread", 0)
-
-
-def get_gmail_unread_older_than_24h():
-    """Nombre de conversations non lues dans INBOX dont le dernier message
-    recu date de plus de 24h (meme logique de comptage que Gmail : par
-    conversation, pas par mail individuel)."""
-    access_token = get_gmail_access_token()
-    if access_token is None:
-        return None
-
-    # "before:<timestamp Unix>" permet une precision a la seconde (contrairement
-    # a "older_than:1d", dont le comportement exact - jour calendaire ou
-    # fenetre glissante - n'est pas documente par Google). Ainsi un mail
-    # recu a 15h devient "+24h" a 15h precises le lendemain, pas a minuit.
-    cutoff_epoch = int(
-        (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(hours=24)).timestamp()
-    )
-
+def _count_gmail_threads(access_token, query):
+    """Compte le nombre exact de conversations correspondant a une recherche
+    Gmail (pagine, car resultSizeEstimate n'est qu'une approximation)."""
     headers = {"Authorization": f"Bearer {access_token}"}
     total = 0
     page_token = None
     while True:
-        params = {
-            "q": f"in:inbox is:unread before:{cutoff_epoch}",
-            "maxResults": 500,
-        }
+        params = {"q": query, "maxResults": 500}
         if page_token:
             params["pageToken"] = page_token
         resp = requests.get(
@@ -317,6 +285,35 @@ def get_gmail_unread_older_than_24h():
         if not page_token:
             break
     return total
+
+
+def get_gmail_unread_inbox():
+    """Nombre de conversations non lues dans l'onglet Principale de la
+    boite de reception (comme affiche par Gmail dans le menu de gauche),
+    et non le total tous onglets confondus (Promotions, Notifications...)."""
+    access_token = get_gmail_access_token()
+    if access_token is None:
+        return None
+    return _count_gmail_threads(access_token, "in:inbox is:unread category:primary")
+
+
+def get_gmail_unread_older_than_24h():
+    """Nombre de conversations non lues dans l'onglet Principale dont le
+    dernier message recu date de plus de 24h."""
+    access_token = get_gmail_access_token()
+    if access_token is None:
+        return None
+
+    # "before:<timestamp Unix>" permet une precision a la seconde (contrairement
+    # a "older_than:1d", dont le comportement exact - jour calendaire ou
+    # fenetre glissante - n'est pas documente par Google). Ainsi un mail
+    # recu a 15h devient "+24h" a 15h precises le lendemain, pas a minuit.
+    cutoff_epoch = int(
+        (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(hours=24)).timestamp()
+    )
+    return _count_gmail_threads(
+        access_token, f"in:inbox is:unread category:primary before:{cutoff_epoch}"
+    )
 
 
 def refresh_cache():
