@@ -263,7 +263,8 @@ def get_gmail_access_token():
 
 
 def get_gmail_unread_inbox():
-    """Nombre de mails non lus dans la boite de reception (INBOX)."""
+    """Nombre de conversations non lues dans la boite de reception (INBOX),
+    comme affiche par Gmail (et non le nombre de mails individuels)."""
     access_token = get_gmail_access_token()
     if access_token is None:
         return None
@@ -274,11 +275,13 @@ def get_gmail_unread_inbox():
         timeout=20,
     )
     resp.raise_for_status()
-    return resp.json().get("messagesUnread", 0)
+    return resp.json().get("threadsUnread", 0)
 
 
 def get_gmail_unread_older_than_24h():
-    """Nombre de mails non lus dans INBOX dont le dernier message recu date de plus de 24h."""
+    """Nombre de conversations non lues dans INBOX dont le dernier message
+    recu date de plus de 24h (meme logique de comptage que Gmail : par
+    conversation, pas par mail individuel)."""
     access_token = get_gmail_access_token()
     if access_token is None:
         return None
@@ -302,14 +305,14 @@ def get_gmail_unread_older_than_24h():
         if page_token:
             params["pageToken"] = page_token
         resp = requests.get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads",
             headers=headers,
             params=params,
             timeout=20,
         )
         resp.raise_for_status()
         data = resp.json()
-        total += len(data.get("messages", []))
+        total += len(data.get("threads", []))
         page_token = data.get("nextPageToken")
         if not page_token:
             break
