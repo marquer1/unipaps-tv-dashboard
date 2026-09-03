@@ -1181,12 +1181,15 @@ def render_html():
   .error {{ background: #fbe0e0; color: #a52323; text-align: center; padding: 10px; font-size: 15px; border-radius: 10px; margin-bottom: 12px; }}
   @media (max-width: 1100px) {{ .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
-  .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }}
-  .brand-logo {{ height: 150px; width: auto; margin-bottom: -18px; display: block; }}
+  .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 8px; }}
+  .brand-logo {{ height: 110px; width: auto; display: block; }}
+  .header-row {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }}
   .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; line-height: 1; }}
+  .header-row .tabs {{ margin-bottom: 0; }}
   @media (max-width: 700px) {{
-    .brand-logo {{ height: 90px; margin-bottom: -10px; }}
+    .brand-logo {{ height: 70px; }}
     .brand-date {{ font-size: 19px; }}
+    .header-row {{ justify-content: center; }}
   }}
 </style>
 </head>
@@ -1194,14 +1197,16 @@ def render_html():
 <div class="wrap">
   <div class="brand-header">
     <img id="brand-logo-img" class="brand-logo" src="data:image/png;base64,{LOGO_B64}" alt="Unipap's">
-    <div class="brand-date">{today_label}</div>
   </div>
   {error_banner}
 
-  <div class="tabs">
-    <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes', true)">📦 Commandes</button>
-    <button class="tab-btn" data-tab="sav" onclick="showTab('sav', true)">📧 SAV</button>
-    <button class="tab-btn" data-tab="ads" onclick="showTab('ads', true)">📊 Ads</button>
+  <div class="header-row">
+    <div class="brand-date">{today_label}</div>
+    <div class="tabs">
+      <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes', true)">📦 Commandes</button>
+      <button class="tab-btn" data-tab="sav" onclick="showTab('sav', true)">📧 SAV</button>
+      <button class="tab-btn" data-tab="ads" onclick="showTab('ads', true)">📊 Ads</button>
+    </div>
   </div>
 
   <div id="tab-commandes" class="tab-panel">
