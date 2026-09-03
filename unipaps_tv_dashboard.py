@@ -238,6 +238,13 @@ def count_orders(token, search_query):
 def get_gmail_unread_inbox():
     """Nombre de mails non lus dans la boite de reception (INBOX)."""
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
+        print(
+            "[Gmail] Variables manquantes : "
+            f"GOOGLE_CLIENT_ID={'ok' if GOOGLE_CLIENT_ID else 'MANQUANT'}, "
+            f"GOOGLE_CLIENT_SECRET={'ok' if GOOGLE_CLIENT_SECRET else 'MANQUANT'}, "
+            f"GOOGLE_REFRESH_TOKEN={'ok' if GOOGLE_REFRESH_TOKEN else 'MANQUANT'}",
+            flush=True,
+        )
         return None
     token_resp = requests.post(
         "https://oauth2.googleapis.com/token",
@@ -308,8 +315,9 @@ def refresh_cache():
         # le reste du dashboard si l'autorisation Google expire ou echoue.
         try:
             gmail_unread = get_gmail_unread_inbox()
-        except Exception:  # noqa: BLE001
+        except Exception as gmail_exc:  # noqa: BLE001
             gmail_unread = None
+            print(f"[Gmail] Erreur lors de la recuperation des mails non lus : {gmail_exc}", flush=True)
 
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
@@ -627,12 +635,17 @@ def render_html():
 # --------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        html = render_html().encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(html)))
-        self.end_headers()
-        self.wfile.write(html)
+        try:
+            html = render_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+        except (BrokenPipeError, ConnectionResetError):
+            # Le navigateur a ferme/recharge la connexion avant la fin de
+            # l'envoi (frequent avec l'auto-refresh) : sans gravite.
+            pass
 
     def log_message(self, fmt, *args):
         return
