@@ -249,13 +249,15 @@ def get_gmail_unread_inbox():
     token_resp = requests.post(
         "https://oauth2.googleapis.com/token",
         data={
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
-            "refresh_token": GOOGLE_REFRESH_TOKEN,
+            "client_id": GOOGLE_CLIENT_ID.strip(),
+            "client_secret": GOOGLE_CLIENT_SECRET.strip(),
+            "refresh_token": GOOGLE_REFRESH_TOKEN.strip(),
             "grant_type": "refresh_token",
         },
         timeout=20,
     )
+    if not token_resp.ok:
+        print(f"[Gmail] Reponse Google (token) : {token_resp.status_code} {token_resp.text}", flush=True)
     token_resp.raise_for_status()
     access_token = token_resp.json()["access_token"]
 
