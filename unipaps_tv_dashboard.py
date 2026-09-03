@@ -64,14 +64,15 @@ CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_sec
 # precommandes, transporteurs, prevision) doivent etre additionnees a
 # celles d'Unipap's dans l'onglet Commandes. Unipap's (SHOPIFY_STORE /
 # SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET ci-dessus) est toujours la
-# boutique n°1 ; on ajoute jusqu'a 2 boutiques de plus via des variables
-# suffixees _2 et _3 (meme principe que pour la boutique n°1) :
+# boutique n°1 ; on ajoute jusqu'a 3 boutiques de plus via des variables
+# suffixees _2, _3 et _4 (meme principe que pour la boutique n°1) :
 #   SHOPIFY_STORE_2 / SHOPIFY_CLIENT_ID_2 / SHOPIFY_CLIENT_SECRET_2
 #   SHOPIFY_STORE_3 / SHOPIFY_CLIENT_ID_3 / SHOPIFY_CLIENT_SECRET_3
+#   SHOPIFY_STORE_4 / SHOPIFY_CLIENT_ID_4 / SHOPIFY_CLIENT_SECRET_4
 # Une boutique dont les 3 variables ne sont pas toutes renseignees est
 # simplement ignoree (pas d'erreur).
 SHOPIFY_STORES = [{"shop": SHOP, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}]
-for _i in (2, 3):
+for _i in (2, 3, 4):
     _shop = os.environ.get(f"SHOPIFY_STORE_{_i}", "").strip()
     _cid = os.environ.get(f"SHOPIFY_CLIENT_ID_{_i}", "").strip()
     _csecret = os.environ.get(f"SHOPIFY_CLIENT_SECRET_{_i}", "").strip()
