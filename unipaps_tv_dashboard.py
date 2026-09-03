@@ -187,6 +187,7 @@ _cache = {
     "carriers": {},
     "commandes_du_jour": 0,
     "gmail_unread": None,
+    "gmail_unread_24h": None,
     "updated_at": None,
     "error": None,
 }
@@ -235,8 +236,7 @@ def count_orders(token, search_query):
     return total
 
 
-def get_gmail_unread_inbox():
-    """Nombre de mails non lus dans la boite de reception (INBOX)."""
+def get_gmail_access_token():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN):
         print(
             "[Gmail] Variables manquantes : "
@@ -259,7 +259,14 @@ def get_gmail_unread_inbox():
     if not token_resp.ok:
         print(f"[Gmail] Reponse Google (token) : {token_resp.status_code} {token_resp.text}", flush=True)
     token_resp.raise_for_status()
-    access_token = token_resp.json()["access_token"]
+    return token_resp.json()["access_token"]
+
+
+def get_gmail_unread_inbox():
+    """Nombre de mails non lus dans la boite de reception (INBOX)."""
+    access_token = get_gmail_access_token()
+    if access_token is None:
+        return None
 
     resp = requests.get(
         "https://gmail.googleapis.com/gmail/v1/users/me/labels/INBOX",
@@ -268,6 +275,37 @@ def get_gmail_unread_inbox():
     )
     resp.raise_for_status()
     return resp.json().get("messagesUnread", 0)
+
+
+def get_gmail_unread_older_than_24h():
+    """Nombre de mails non lus dans INBOX dont le dernier message recu date de plus de 24h."""
+    access_token = get_gmail_access_token()
+    if access_token is None:
+        return None
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    total = 0
+    page_token = None
+    while True:
+        params = {
+            "q": "in:inbox is:unread older_than:1d",
+            "maxResults": 500,
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        total += len(data.get("messages", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return total
 
 
 def refresh_cache():
@@ -321,12 +359,19 @@ def refresh_cache():
             gmail_unread = None
             print(f"[Gmail] Erreur lors de la recuperation des mails non lus : {gmail_exc}", flush=True)
 
+        try:
+            gmail_unread_24h = get_gmail_unread_older_than_24h()
+        except Exception as gmail_exc:  # noqa: BLE001
+            gmail_unread_24h = None
+            print(f"[Gmail] Erreur lors de la recuperation des mails +24h : {gmail_exc}", flush=True)
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["precommandes"] = precommandes
             _cache["carriers"] = carriers
             _cache["commandes_du_jour"] = commandes_du_jour
             _cache["gmail_unread"] = gmail_unread
+            _cache["gmail_unread_24h"] = gmail_unread_24h
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -379,6 +424,7 @@ def render_html():
         carriers = dict(_cache["carriers"])
         commandes_du_jour = _cache["commandes_du_jour"]
         gmail_unread = _cache["gmail_unread"]
+        gmail_unread_24h = _cache["gmail_unread_24h"]
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -438,6 +484,34 @@ def render_html():
       <div>
         <div class="stat-label">Mails à traiter</div>
         <div class="stat-value purple">{gmail_unread}</div>
+      </div>
+    </div>"""
+
+    if gmail_unread_24h is None:
+        gmail_24h_card = """
+    <div class="card">
+      <div class="icon-box icon-purple">⏳</div>
+      <div>
+        <div class="stat-label">Mails à traiter +24h</div>
+        <div class="stat-value purple" style="font-size:18px;">Indisponible</div>
+      </div>
+    </div>"""
+    elif gmail_unread_24h == 0:
+        gmail_24h_card = f"""
+    <div class="card">
+      <div class="icon-box icon-green">✅</div>
+      <div>
+        <div class="stat-label">Mails à traiter +24h</div>
+        <div class="stat-value green" style="font-size:26px;">{SUCCESS_MESSAGE}</div>
+      </div>
+    </div>"""
+    else:
+        gmail_24h_card = f"""
+    <div class="card">
+      <div class="icon-box icon-orange">⚠️</div>
+      <div>
+        <div class="stat-label">Mails à traiter +24h</div>
+        <div class="stat-value orange">{gmail_unread_24h}</div>
       </div>
     </div>"""
 
@@ -525,7 +599,7 @@ def render_html():
     .carrier-bar-track {{ grid-area: bar; }}
   }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
-  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -624,6 +698,7 @@ def render_html():
       </div>
     </div>
     {gmail_card}
+    {gmail_24h_card}
   </div>
 
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
