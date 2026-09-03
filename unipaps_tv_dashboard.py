@@ -234,6 +234,7 @@ _cache = {
     "gmail_unread_24h_senders": [],
     "gmail_label_counts": {},
     "revenue_by_country": {},
+    "revenue_totals": {},
     "updated_at": None,
     "error": None,
 }
@@ -372,6 +373,30 @@ def compute_revenue_by_country_group(orders):
             "veille": round(total_veille, 2),
         }
     return result
+
+
+def compute_revenue_totals(orders):
+    """CA TTC (net des remboursements) toutes commandes confondues, tous
+    pays inclus (contrairement a compute_revenue_by_country_group, qui ne
+    regroupe que les pays suivis) - sert au total affiche en haut de
+    l'onglet Ads, pour qu'il corresponde exactement a la vente totale
+    Shopify. Renvoie {"30j": float, "7j": float, "veille": float}."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
+    yesterday_date = (now - timedelta(days=1)).date()
+
+    total_30j = total_7j = total_veille = 0.0
+    for o in orders:
+        total_30j += o["amount"]
+        if o["created_at"] >= since_7j:
+            total_7j += o["amount"]
+        if o["created_at"].date() == yesterday_date:
+            total_veille += o["amount"]
+    return {
+        "30j": round(total_30j, 2),
+        "7j": round(total_7j, 2),
+        "veille": round(total_veille, 2),
+    }
 
 
 def get_gmail_access_token():
@@ -637,8 +662,10 @@ def refresh_cache():
         try:
             orders_30j = get_shopify_orders_last_30j(token)
             revenue_by_country = compute_revenue_by_country_group(orders_30j)
+            revenue_totals = compute_revenue_totals(orders_30j)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
+            revenue_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
         with _cache_lock:
@@ -651,6 +678,7 @@ def refresh_cache():
             _cache["gmail_unread_24h_senders"] = gmail_unread_24h_senders
             _cache["gmail_label_counts"] = gmail_label_counts
             _cache["revenue_by_country"] = revenue_by_country
+            _cache["revenue_totals"] = revenue_totals
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -707,6 +735,7 @@ def render_html():
         gmail_unread_24h_senders = list(_cache["gmail_unread_24h_senders"])
         gmail_label_counts = dict(_cache["gmail_label_counts"])
         revenue_by_country = dict(_cache["revenue_by_country"])
+        revenue_totals = dict(_cache["revenue_totals"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -877,9 +906,9 @@ def render_html():
     if has_others:
         ads_rows += _ads_row("🌍 Autres pays", {k: round(v, 2) for k, v in others_totals.items()})
 
-    ca_total_30j = sum((e.get("30j") or 0) for e in revenue_by_country.values())
-    ca_total_7j = sum((e.get("7j") or 0) for e in revenue_by_country.values())
-    ca_total_veille = sum((e.get("veille") or 0) for e in revenue_by_country.values())
+    ca_total_30j = revenue_totals.get("30j")
+    ca_total_7j = revenue_totals.get("7j")
+    ca_total_veille = revenue_totals.get("veille")
 
     def _ca_card(label, value, icon):
         return f"""
