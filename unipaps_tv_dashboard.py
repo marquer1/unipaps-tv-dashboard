@@ -375,12 +375,15 @@ def render_html():
             <div class="stat-sub blue">🛒 {format_plateaux(pred_total)}</div>
             <div class="stat-sub-label">Plateaux</div>
           </div>
-          <div class="divider"></div>
-          <div>
-            <div class="stat-sub blue">⏱️ {format_minutes(pred_temps)}</div>
-            <div class="stat-sub-label">Temps estimé</div>
-          </div>
         </div>
+      </div>
+    </div>"""
+        prediction_temps_card = f"""
+    <div class="card">
+      <div class="icon-box icon-blue">⏱️</div>
+      <div>
+        <div class="stat-label">Temps de traitement estimé (prévision)</div>
+        <div class="stat-value blue">{format_minutes(pred_temps)}</div>
       </div>
     </div>"""
     else:
@@ -389,6 +392,14 @@ def render_html():
       <div class="icon-box icon-blue">🔮</div>
       <div>
         <div class="stat-label">Prévision à {PREDICTION_HOUR}h</div>
+        <div class="stat-value blue" style="font-size:20px;">Heure dépassée</div>
+      </div>
+    </div>"""
+        prediction_temps_card = f"""
+    <div class="card">
+      <div class="icon-box icon-blue">⏱️</div>
+      <div>
+        <div class="stat-label">Temps de traitement estimé (prévision)</div>
         <div class="stat-value blue" style="font-size:20px;">Heure dépassée</div>
       </div>
     </div>"""
@@ -431,7 +442,7 @@ def render_html():
     .carrier-count {{ grid-area: count; }}
     .carrier-bar-track {{ grid-area: bar; }}
   }}
-  .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
@@ -500,6 +511,7 @@ def render_html():
       </div>
     </div>
     {prediction_card}
+    {prediction_temps_card}
   </div>
 
   <div class="carriers-card">
