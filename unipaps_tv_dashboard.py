@@ -1150,6 +1150,7 @@ def render_html():
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
     .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }}
+    .grid-ads {{ grid-template-columns: 1fr 1fr; gap: 10px; }}
     .carrier-row {{ grid-template-columns: 1fr 34px; grid-template-areas: "label count" "bar bar"; row-gap: 4px; }}
     .carrier-label {{ grid-area: label; }}
     .carrier-count {{ grid-area: count; }}
