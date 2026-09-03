@@ -877,6 +877,40 @@ def render_html():
     if has_others:
         ads_rows += _ads_row("🌍 Autres pays", {k: round(v, 2) for k, v in others_totals.items()})
 
+    ca_total_30j = sum((e.get("30j") or 0) for e in revenue_by_country.values())
+    ca_total_7j = sum((e.get("7j") or 0) for e in revenue_by_country.values())
+    ca_total_veille = sum((e.get("veille") or 0) for e in revenue_by_country.values())
+
+    def _ca_card(label, value, icon):
+        return f"""
+    <div class="card">
+      <div class="icon-box icon-green">{icon}</div>
+      <div>
+        <div class="stat-label">{label}</div>
+        <div class="stat-value green">{fmt_eur(value)}</div>
+      </div>
+    </div>"""
+
+    def _ratio_card(label):
+        return f"""
+    <div class="card">
+      <div class="icon-box icon-blue">📊</div>
+      <div>
+        <div class="stat-label">{label}</div>
+        <div class="stat-value blue" style="font-size:18px;">En attente API Ads</div>
+      </div>
+    </div>"""
+
+    ads_summary_cards = f"""
+    <div class="grid-ads">
+      {_ca_card("CA total 30 jours", ca_total_30j, "💰")}
+      {_ratio_card("Ratio CA/Ads 30 jours")}
+      {_ca_card("CA total 7 jours", ca_total_7j, "💰")}
+      {_ratio_card("Ratio CA/Ads 7 jours")}
+      {_ca_card("CA total veille", ca_total_veille, "💰")}
+      {_ratio_card("Ratio CA/Ads veille")}
+    </div>"""
+
     ads_card = f"""
     <div class="carriers-card">
       <div class="carriers-title">CA Shopify TTC &amp; dépenses Google Ads par pays</div>
@@ -984,6 +1018,7 @@ def render_html():
   }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-ads {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
 
   .tabs {{ display: flex; gap: 10px; margin-bottom: 18px; justify-content: center; }}
   .tab-btn {{
@@ -1120,6 +1155,7 @@ def render_html():
   </div>
 
   <div id="tab-ads" class="tab-panel" hidden>
+    {ads_summary_cards}
     {ads_card}
   </div>
 
