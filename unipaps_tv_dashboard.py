@@ -742,11 +742,11 @@ def render_html():
   .error {{ background: #fbe0e0; color: #a52323; text-align: center; padding: 10px; font-size: 15px; border-radius: 10px; margin-bottom: 12px; }}
   @media (max-width: 1100px) {{ .grid-top, .grid-bottom {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
-  .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 22px; }}
-  .brand-logo {{ height: 150px; width: auto; margin-bottom: 10px; }}
-  .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; }}
+  .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 10px; }}
+  .brand-logo {{ height: 150px; width: auto; margin-bottom: -18px; display: block; }}
+  .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; line-height: 1; }}
   @media (max-width: 700px) {{
-    .brand-logo {{ height: 90px; }}
+    .brand-logo {{ height: 90px; margin-bottom: -10px; }}
     .brand-date {{ font-size: 19px; }}
   }}
 </style>
