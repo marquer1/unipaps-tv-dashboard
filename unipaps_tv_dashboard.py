@@ -65,19 +65,25 @@ CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_sec
 # celles d'Unipap's dans l'onglet Commandes. Unipap's (SHOPIFY_STORE /
 # SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET ci-dessus) est toujours la
 # boutique n°1 ; on ajoute jusqu'a 3 boutiques de plus via des variables
-# suffixees _2, _3 et _4 (meme principe que pour la boutique n°1) :
-#   SHOPIFY_STORE_2 / SHOPIFY_CLIENT_ID_2 / SHOPIFY_CLIENT_SECRET_2
-#   SHOPIFY_STORE_3 / SHOPIFY_CLIENT_ID_3 / SHOPIFY_CLIENT_SECRET_3
-#   SHOPIFY_STORE_4 / SHOPIFY_CLIENT_ID_4 / SHOPIFY_CLIENT_SECRET_4
-# Une boutique dont les 3 variables ne sont pas toutes renseignees est
-# simplement ignoree (pas d'erreur).
+# suffixees _2, _3 et _4.
+#
+# L'app etant une app "distribuee" creee sur le Dev Dashboard (Partner
+# Dashboard) et simplement installee sur chaque boutique, le Client ID et
+# le Client Secret sont les memes partout (propres a l'app, pas a la
+# boutique) : il suffit donc de renseigner le domaine de chaque boutique
+# supplementaire, SHOPIFY_STORE_2 / SHOPIFY_STORE_3 / SHOPIFY_STORE_4.
+# Si jamais une boutique a ete connectee avec une app differente (Client
+# ID/Secret propres), on peut quand meme les preciser individuellement via
+# SHOPIFY_CLIENT_ID_2/3/4 et SHOPIFY_CLIENT_SECRET_2/3/4 - sinon, par
+# defaut, ils reprennent ceux d'Unipap's (CLIENT_ID / CLIENT_SECRET).
 SHOPIFY_STORES = [{"shop": SHOP, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}]
 for _i in (2, 3, 4):
     _shop = os.environ.get(f"SHOPIFY_STORE_{_i}", "").strip()
-    _cid = os.environ.get(f"SHOPIFY_CLIENT_ID_{_i}", "").strip()
-    _csecret = os.environ.get(f"SHOPIFY_CLIENT_SECRET_{_i}", "").strip()
-    if _shop and _cid and _csecret:
-        SHOPIFY_STORES.append({"shop": _shop, "client_id": _cid, "client_secret": _csecret})
+    if not _shop:
+        continue
+    _cid = os.environ.get(f"SHOPIFY_CLIENT_ID_{_i}", "").strip() or CLIENT_ID
+    _csecret = os.environ.get(f"SHOPIFY_CLIENT_SECRET_{_i}", "").strip() or CLIENT_SECRET
+    SHOPIFY_STORES.append({"shop": _shop, "client_id": _cid, "client_secret": _csecret})
 
 # Gmail (mails non lus dans la boite de reception)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
