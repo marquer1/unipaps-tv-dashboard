@@ -304,21 +304,41 @@ def get_gmail_unread_inbox():
 
 def get_gmail_label_unread_counts(label_names):
     """Nombre de conversations non lues (threadsUnread) pour chaque libelle
-    Gmail demande, dans l'ordre. Renvoie {nom: nombre} ou {} si indisponible."""
+    Gmail demande, dans l'ordre. Renvoie {nom: nombre} ou {} si indisponible.
+
+    "labels.list" ne renvoie PAS les compteurs (messagesUnread,
+    threadsUnread, ...) pour les libelles utilisateur - seul "labels.get"
+    (appele par libelle) les fournit. On liste d'abord pour retrouver les
+    ID correspondant aux noms demandes, puis on interroge chacun."""
     access_token = get_gmail_access_token()
     if access_token is None:
         return {}
+    headers = {"Authorization": f"Bearer {access_token}"}
+
     resp = requests.get(
         "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers=headers,
         timeout=20,
     )
     resp.raise_for_status()
-    by_name = {lbl.get("name"): lbl for lbl in resp.json().get("labels", [])}
+    id_by_name = {lbl.get("name"): lbl.get("id") for lbl in resp.json().get("labels", [])}
+
     counts = {}
     for name in label_names:
-        lbl = by_name.get(name)
-        counts[name] = lbl.get("threadsUnread", 0) if lbl else None
+        label_id = id_by_name.get(name)
+        if not label_id:
+            counts[name] = None
+            continue
+        try:
+            lbl_resp = requests.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/labels/{label_id}",
+                headers=headers,
+                timeout=20,
+            )
+            lbl_resp.raise_for_status()
+            counts[name] = lbl_resp.json().get("threadsUnread", 0)
+        except Exception:  # noqa: BLE001
+            counts[name] = None
     return counts
 
 
