@@ -1128,7 +1128,7 @@ def render_html():
     background: #ffffff; color: #8b95a5; border: 1px solid #e5e9f0;
     border-radius: 12px; padding: 10px 22px;
   }}
-  .tab-btn-active {{ background: #1a1f29; color: #ffffff; border-color: #1a1f29; }}
+  .tab-btn-active {{ background: linear-gradient(90deg, #f6c877, #eba54b); color: #1a1f29; border-color: #eba54b; }}
 
   .ads-table {{ width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }}
   .ads-table th {{ text-align: left; font-size: 12px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 8px 10px; border-bottom: 2px solid #e5e9f0; }}
@@ -1182,7 +1182,7 @@ def render_html():
   @media (max-width: 1100px) {{ .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
   .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 8px; }}
-  .brand-logo {{ height: 110px; width: auto; display: block; }}
+  .brand-logo {{ height: 145px; width: auto; display: block; }}
   .header-row {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }}
   .brand-date {{ font-size: 26px; font-weight: 800; color: #1a1f29; text-transform: uppercase; letter-spacing: 0.01em; line-height: 1; }}
   .header-row .tabs {{ margin-bottom: 0; }}
