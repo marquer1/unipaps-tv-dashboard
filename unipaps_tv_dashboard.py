@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-A2C Digital - Dashboard TV
+Unipap's - Dashboard TV
 =======================
 
 Reproduit le dashboard "commandes a traiter" en grand format pour une TV :
@@ -1147,6 +1147,14 @@ def render_html():
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }}
   .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; }}
+  .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-ads {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 18px; }}
+  .grid-ads .card {{ padding: 14px 16px; gap: 10px; }}
+  .grid-ads .icon-box {{ width: 40px; height: 40px; font-size: 20px; border-radius: 10px; }}
+  .grid-ads .stat-label {{ font-size: 11px; }}
+  .grid-ads .stat-value {{ font-size: 22px; }}
+
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
     .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }}
@@ -1156,13 +1164,6 @@ def render_html():
     .carrier-count {{ grid-area: count; }}
     .carrier-bar-track {{ grid-area: bar; }}
   }}
-  .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
-  .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
-  .grid-ads {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 18px; }}
-  .grid-ads .card {{ padding: 14px 16px; gap: 10px; }}
-  .grid-ads .icon-box {{ width: 40px; height: 40px; font-size: 20px; border-radius: 10px; }}
-  .grid-ads .stat-label {{ font-size: 11px; }}
-  .grid-ads .stat-value {{ font-size: 22px; }}
 
   .tabs {{ display: flex; gap: 10px; margin-bottom: 18px; justify-content: center; }}
   .tab-btn {{
