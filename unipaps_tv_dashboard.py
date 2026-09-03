@@ -1128,7 +1128,7 @@ def render_html():
     background: #ffffff; color: #8b95a5; border: 1px solid #e5e9f0;
     border-radius: 12px; padding: 10px 22px;
   }}
-  .tab-btn-active {{ background: linear-gradient(90deg, #f6c877, #eba54b); color: #1a1f29; border-color: #eba54b; }}
+  .tab-btn-active {{ background: linear-gradient(90deg, #f6c877, #eba54b); color: #ffffff; border-color: #eba54b; }}
 
   .ads-table {{ width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }}
   .ads-table th {{ text-align: left; font-size: 12px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 8px 10px; border-bottom: 2px solid #e5e9f0; }}
