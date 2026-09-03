@@ -1046,7 +1046,7 @@ def render_html():
     background: #f2f4f7; color: #1a1f29;
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   }}
-  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; }}
+  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; }}
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
     .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }}
