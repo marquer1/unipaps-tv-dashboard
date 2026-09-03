@@ -359,26 +359,30 @@ def get_gmail_unread_older_than_24h():
                 t_resp.raise_for_status()
                 messages = t_resp.json().get("messages", [])
 
-                # On cible precisement le message NON LU et vieux de plus de
-                # 24h qui a fait matcher la conversation (le plus recent
-                # d'entre eux s'il y en a plusieurs), en excluant nos propres
-                # messages (labelIds contient "SENT") - un fil peut rester
-                # marque non lu comme pense-bete meme apres notre reponse.
+                # On cible le message qui justifie l'alerte, par ordre de
+                # preference decroissant (certains fils sont "non lus" au
+                # niveau du fil sans qu'aucun message individuel ne porte
+                # l'etiquette UNREAD - decalage d'indexation Gmail connu -
+                # donc on ne peut pas se fier uniquement a UNREAD) :
+                #   1) message externe (pas de nous) + UNREAD + avant cutoff
+                #   2) message externe (pas de nous) + avant cutoff
+                #   3) dernier message externe (pas de nous) du fil
+                #   4) en dernier recours, le dernier message du fil
                 cutoff_ms = cutoff_epoch * 1000
+                non_self = [m for m in messages if "SENT" not in m.get("labelIds", [])]
+
                 candidates = [
-                    m for m in messages
+                    m for m in non_self
                     if "UNREAD" in m.get("labelIds", [])
-                    and "SENT" not in m.get("labelIds", [])
                     and int(m.get("internalDate", "0")) < cutoff_ms
                 ]
                 if not candidates:
-                    # Repli : tout message non lu (meme envoye par nous) avant
-                    # tout message tout court, pour ne jamais planter.
                     candidates = [
-                        m for m in messages
-                        if "UNREAD" in m.get("labelIds", [])
-                        and int(m.get("internalDate", "0")) < cutoff_ms
+                        m for m in non_self
+                        if int(m.get("internalDate", "0")) < cutoff_ms
                     ]
+                if not candidates:
+                    candidates = non_self
                 target = candidates[-1] if candidates else (messages[-1] if messages else None)
 
                 if target:
