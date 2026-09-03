@@ -362,6 +362,7 @@ def render_html():
     prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
         pred_total, pred_new = prediction
+        pred_temps = (pred_total / COMMANDES_PAR_PLATEAU) * MINUTES_PAR_PLATEAU
         prediction_card = f"""
     <div class="card">
       <div class="icon-box icon-blue">🔮</div>
@@ -373,6 +374,11 @@ def render_html():
           <div>
             <div class="stat-sub blue">🛒 {format_plateaux(pred_total)}</div>
             <div class="stat-sub-label">Plateaux</div>
+          </div>
+          <div class="divider"></div>
+          <div>
+            <div class="stat-sub blue">⏱️ {format_minutes(pred_temps)}</div>
+            <div class="stat-sub-label">Temps estimé</div>
           </div>
         </div>
       </div>
