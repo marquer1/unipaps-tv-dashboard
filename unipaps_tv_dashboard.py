@@ -188,6 +188,7 @@ _cache = {
     "commandes_du_jour": 0,
     "gmail_unread": None,
     "gmail_unread_24h": None,
+    "gmail_unread_24h_senders": [],
     "updated_at": None,
     "error": None,
 }
@@ -297,12 +298,23 @@ def get_gmail_unread_inbox():
     return _count_gmail_threads(access_token, "in:inbox is:unread category:primary")
 
 
+def _parse_sender_name(from_header):
+    """Extrait le nom affiche d'un en-tete 'From', ou l'adresse a defaut."""
+    if not from_header:
+        return "Expéditeur inconnu"
+    if "<" in from_header:
+        name = from_header.split("<")[0].strip().strip('"')
+        return name if name else from_header.split("<")[1].rstrip(">").strip()
+    return from_header.strip()
+
+
 def get_gmail_unread_older_than_24h():
-    """Nombre de conversations non lues dans l'onglet Principale dont le
-    dernier message recu date de plus de 24h."""
+    """Nombre + liste des expediteurs des conversations non lues dans
+    l'onglet Principale dont le dernier message recu date de plus de 24h.
+    Renvoie (total, [noms d'expediteurs]) ou (None, None) si indisponible."""
     access_token = get_gmail_access_token()
     if access_token is None:
-        return None
+        return None, None
 
     # "before:<timestamp Unix>" permet une precision a la seconde (contrairement
     # a "older_than:1d", dont le comportement exact - jour calendaire ou
@@ -311,9 +323,54 @@ def get_gmail_unread_older_than_24h():
     cutoff_epoch = int(
         (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(hours=24)).timestamp()
     )
-    return _count_gmail_threads(
-        access_token, f"in:inbox is:unread category:primary before:{cutoff_epoch}"
-    )
+    query = f"in:inbox is:unread category:primary before:{cutoff_epoch}"
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    total = 0
+    senders = []
+    page_token = None
+    while True:
+        params = {"q": query, "maxResults": 500}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = requests.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+            headers=headers,
+            params=params,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        threads = data.get("threads", [])
+        total += len(threads)
+
+        # On ne recupere le detail (expediteur) que pour un nombre
+        # raisonnable de conversations, pour eviter trop d'appels API.
+        for thread in threads:
+            if len(senders) >= 30:
+                break
+            try:
+                t_resp = requests.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{thread['id']}",
+                    headers=headers,
+                    params={"format": "metadata", "metadataHeaders": "From"},
+                    timeout=20,
+                )
+                t_resp.raise_for_status()
+                messages = t_resp.json().get("messages", [])
+                if messages:
+                    payload_headers = messages[-1].get("payload", {}).get("headers", [])
+                    from_header = next(
+                        (h["value"] for h in payload_headers if h["name"] == "From"), None
+                    )
+                    senders.append(_parse_sender_name(from_header))
+            except Exception:  # noqa: BLE001
+                pass
+
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return total, senders
 
 
 def refresh_cache():
@@ -368,9 +425,10 @@ def refresh_cache():
             print(f"[Gmail] Erreur lors de la recuperation des mails non lus : {gmail_exc}", flush=True)
 
         try:
-            gmail_unread_24h = get_gmail_unread_older_than_24h()
+            gmail_unread_24h, gmail_unread_24h_senders = get_gmail_unread_older_than_24h()
         except Exception as gmail_exc:  # noqa: BLE001
             gmail_unread_24h = None
+            gmail_unread_24h_senders = []
             print(f"[Gmail] Erreur lors de la recuperation des mails +24h : {gmail_exc}", flush=True)
 
         with _cache_lock:
@@ -380,6 +438,7 @@ def refresh_cache():
             _cache["commandes_du_jour"] = commandes_du_jour
             _cache["gmail_unread"] = gmail_unread
             _cache["gmail_unread_24h"] = gmail_unread_24h
+            _cache["gmail_unread_24h_senders"] = gmail_unread_24h_senders
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -433,6 +492,7 @@ def render_html():
         commandes_du_jour = _cache["commandes_du_jour"]
         gmail_unread = _cache["gmail_unread"]
         gmail_unread_24h = _cache["gmail_unread_24h"]
+        gmail_unread_24h_senders = list(_cache["gmail_unread_24h_senders"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -522,6 +582,22 @@ def render_html():
         <div class="stat-value orange">{gmail_unread_24h}</div>
       </div>
     </div>"""
+
+    if gmail_unread_24h_senders:
+        sender_chips = "".join(
+            f'<span class="sender-chip">{s}</span>' for s in gmail_unread_24h_senders
+        )
+        more_note = ""
+        if gmail_unread_24h and gmail_unread_24h > len(gmail_unread_24h_senders):
+            reste = gmail_unread_24h - len(gmail_unread_24h_senders)
+            more_note = f'<span class="sender-chip sender-chip-more">+{reste} autre(s)</span>'
+        gmail_24h_senders_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">Mails à traiter +24h <span>(expéditeurs)</span></div>
+      <div class="sender-list">{sender_chips}{more_note}</div>
+    </div>"""
+    else:
+        gmail_24h_senders_card = ""
 
     prediction = compute_prediction(a_traiter, commandes_du_jour)
     if prediction:
@@ -643,6 +719,10 @@ def render_html():
   .carrier-emoji {{ font-size: 17px; }}
   .carrier-bar-track {{ height: 10px; background: #eef1f5; border-radius: 6px; overflow: hidden; }}
   .carrier-bar-fill {{ height: 100%; background: linear-gradient(90deg, #f6c877, #eba54b); border-radius: 6px; }}
+
+  .sender-list {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+  .sender-chip {{ background: #fdeee0; color: #b85c1a; font-size: 14px; font-weight: 600; padding: 6px 12px; border-radius: 20px; }}
+  .sender-chip-more {{ background: #eef1f5; color: #8b95a5; }}
   .carrier-count {{ font-size: 16px; font-weight: 800; text-align: right; }}
 
   .updated {{ text-align: center; font-size: 13px; color: #8b95a5; margin-top: 2px; }}
@@ -708,6 +788,7 @@ def render_html():
     {gmail_card}
     {gmail_24h_card}
   </div>
+  {gmail_24h_senders_card}
 
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
 </div>
