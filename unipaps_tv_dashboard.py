@@ -929,7 +929,7 @@ def render_html():
     # des commandes a traiter par boutique, dans le meme style que la liste
     # des expediteurs des mails +24h.
     now_for_stores = datetime.now(ZoneInfo(TIMEZONE))
-    if now_for_stores.hour >= PREDICTION_HOUR and a_traiter_by_store:
+    if now_for_stores.hour >= PREDICTION_HOUR and a_traiter > 0 and a_traiter_by_store:
         store_chips = "".join(
             f'<span class="sender-chip">{name} : {count} commande{"s" if count != 1 else ""}</span>'
             for name, count in a_traiter_by_store.items()
