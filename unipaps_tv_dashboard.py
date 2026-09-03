@@ -361,15 +361,24 @@ def get_gmail_unread_older_than_24h():
 
                 # On cible precisement le message NON LU et vieux de plus de
                 # 24h qui a fait matcher la conversation (le plus recent
-                # d'entre eux s'il y en a plusieurs) - pas simplement le
-                # dernier message du fil, qui peut etre une reponse deja
-                # envoyee par nous ("Support Unipap's").
+                # d'entre eux s'il y en a plusieurs), en excluant nos propres
+                # messages (labelIds contient "SENT") - un fil peut rester
+                # marque non lu comme pense-bete meme apres notre reponse.
                 cutoff_ms = cutoff_epoch * 1000
                 candidates = [
                     m for m in messages
                     if "UNREAD" in m.get("labelIds", [])
+                    and "SENT" not in m.get("labelIds", [])
                     and int(m.get("internalDate", "0")) < cutoff_ms
                 ]
+                if not candidates:
+                    # Repli : tout message non lu (meme envoye par nous) avant
+                    # tout message tout court, pour ne jamais planter.
+                    candidates = [
+                        m for m in messages
+                        if "UNREAD" in m.get("labelIds", [])
+                        and int(m.get("internalDate", "0")) < cutoff_ms
+                    ]
                 target = candidates[-1] if candidates else (messages[-1] if messages else None)
 
                 if target:
