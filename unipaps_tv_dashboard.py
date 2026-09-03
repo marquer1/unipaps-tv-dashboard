@@ -872,11 +872,21 @@ def render_html():
 
     ADS_MIN_CA_30J = 500.0
 
+    ca_total_30j = revenue_totals.get("30j")
+    ca_total_7j = revenue_totals.get("7j")
+    ca_total_veille = revenue_totals.get("veille")
+
+    def _pct_ca(value):
+        if not value or not ca_total_30j:
+            return "—"
+        return f"{100 * value / ca_total_30j:.1f} %"
+
     def _ads_row(display_name, entry):
         return f"""
         <tr>
           <td>{display_name}</td>
           <td>{fmt_eur(entry.get("30j"))}</td>
+          <td class="ads-pct">{_pct_ca(entry.get("30j"))}</td>
           <td>{fmt_eur(entry.get("7j"))}</td>
           <td>{fmt_eur(entry.get("veille"))}</td>
           <td class="ads-indispo">En attente API Ads</td>
@@ -886,14 +896,19 @@ def render_html():
     ads_rows = ""
     others_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
     has_others = False
-    for label in COUNTRY_GROUPS:
+    sorted_labels = sorted(
+        COUNTRY_GROUPS,
+        key=lambda l: (revenue_by_country.get(l) or {}).get("30j", 0) or 0,
+        reverse=True,
+    )
+    for label in sorted_labels:
         display_name = COUNTRY_DISPLAY_NAMES.get(label, label)
         entry = revenue_by_country.get(label)
         if entry is None:
             ads_rows += f"""
         <tr>
           <td>{display_name}</td>
-          <td colspan="4" class="ads-indispo">Indisponible</td>
+          <td colspan="5" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
         if label != "FR" and entry.get("30j", 0) < ADS_MIN_CA_30J:
@@ -905,10 +920,6 @@ def render_html():
 
     if has_others:
         ads_rows += _ads_row("🌍 Autres pays", {k: round(v, 2) for k, v in others_totals.items()})
-
-    ca_total_30j = revenue_totals.get("30j")
-    ca_total_7j = revenue_totals.get("7j")
-    ca_total_veille = revenue_totals.get("veille")
 
     def _ca_card(label, value, icon):
         return f"""
@@ -949,6 +960,7 @@ def render_html():
           <tr>
             <th>Pays</th>
             <th>CA 30j</th>
+            <th>% CA 30j</th>
             <th>CA 7j</th>
             <th>CA veille</th>
             <th>Dépenses Ads</th>
@@ -1066,6 +1078,7 @@ def render_html():
   .ads-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
   .ads-table tr:last-child td {{ border-bottom: none; }}
   .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
+  .ads-pct {{ color: #8b95a5; font-weight: 500; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -1129,9 +1142,9 @@ def render_html():
   {error_banner}
 
   <div class="tabs">
-    <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes')">📦 Commandes</button>
-    <button class="tab-btn" data-tab="sav" onclick="showTab('sav')">📧 SAV</button>
-    <button class="tab-btn" data-tab="ads" onclick="showTab('ads')">📊 Ads</button>
+    <button class="tab-btn" data-tab="commandes" onclick="showTab('commandes', true)">📦 Commandes</button>
+    <button class="tab-btn" data-tab="sav" onclick="showTab('sav', true)">📧 SAV</button>
+    <button class="tab-btn" data-tab="ads" onclick="showTab('ads', true)">📊 Ads</button>
   </div>
 
   <div id="tab-commandes" class="tab-panel">
@@ -1195,17 +1208,38 @@ def render_html():
   <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
 </div>
 <script>
-  function showTab(name) {{
+  var _autoRotateTimer = null;
+  var _tabOrder = ['commandes', 'sav', 'ads'];
+
+  function showTab(name, manual) {{
     document.querySelectorAll('.tab-panel').forEach(function(el) {{ el.hidden = true; }});
     document.querySelectorAll('.tab-btn').forEach(function(el) {{ el.classList.remove('tab-btn-active'); }});
     document.getElementById('tab-' + name).hidden = false;
     document.querySelector('.tab-btn[data-tab="' + name + '"]').classList.add('tab-btn-active');
     try {{ localStorage.setItem('unipaps_active_tab', name); }} catch (e) {{}}
+    if (manual) {{
+      if (_autoRotateTimer) {{ clearInterval(_autoRotateTimer); _autoRotateTimer = null; }}
+      try {{ localStorage.setItem('unipaps_auto_rotate_stopped', '1'); }} catch (e) {{}}
+    }}
   }}
+
+  function startAutoRotate() {{
+    _autoRotateTimer = setInterval(function() {{
+      var current = 'commandes';
+      try {{ current = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
+      var idx = _tabOrder.indexOf(current);
+      var next = _tabOrder[(idx + 1) % _tabOrder.length];
+      showTab(next);
+    }}, 10000);
+  }}
+
   (function() {{
     var saved = 'commandes';
     try {{ saved = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
     showTab(saved);
+    var stopped = false;
+    try {{ stopped = localStorage.getItem('unipaps_auto_rotate_stopped') === '1'; }} catch (e) {{}}
+    if (!stopped) {{ startAutoRotate(); }}
   }})();
 </script>
 </body>
