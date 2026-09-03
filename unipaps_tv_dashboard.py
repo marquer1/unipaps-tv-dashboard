@@ -878,15 +878,14 @@ def render_html():
 
     def _pct_ca(value):
         if not value or not ca_total_30j:
-            return "—"
-        return f"{100 * value / ca_total_30j:.1f} %"
+            return ""
+        return f' <span class="ads-pct">- {100 * value / ca_total_30j:.1f}%</span>'
 
     def _ads_row(display_name, entry):
         return f"""
         <tr>
-          <td>{display_name}</td>
+          <td>{display_name}{_pct_ca(entry.get("30j"))}</td>
           <td>{fmt_eur(entry.get("30j"))}</td>
-          <td class="ads-pct">{_pct_ca(entry.get("30j"))}</td>
           <td>{fmt_eur(entry.get("7j"))}</td>
           <td>{fmt_eur(entry.get("veille"))}</td>
           <td class="ads-indispo">En attente API Ads</td>
@@ -908,7 +907,7 @@ def render_html():
             ads_rows += f"""
         <tr>
           <td>{display_name}</td>
-          <td colspan="5" class="ads-indispo">Indisponible</td>
+          <td colspan="4" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
         if label != "FR" and entry.get("30j", 0) < ADS_MIN_CA_30J:
@@ -960,7 +959,6 @@ def render_html():
           <tr>
             <th>Pays</th>
             <th>CA 30j</th>
-            <th>% CA 30j</th>
             <th>CA 7j</th>
             <th>CA veille</th>
             <th>Dépenses Ads</th>
@@ -1078,7 +1076,7 @@ def render_html():
   .ads-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
   .ads-table tr:last-child td {{ border-bottom: none; }}
   .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
-  .ads-pct {{ color: #8b95a5; font-weight: 500; }}
+  .ads-pct {{ color: #8b95a5; font-weight: 500; font-size: 13px; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -1228,6 +1226,7 @@ def render_html():
       var current = 'commandes';
       try {{ current = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
       var idx = _tabOrder.indexOf(current);
+      if (idx === -1) {{ idx = 0; }}
       var next = _tabOrder[(idx + 1) % _tabOrder.length];
       showTab(next);
     }}, 10000);
