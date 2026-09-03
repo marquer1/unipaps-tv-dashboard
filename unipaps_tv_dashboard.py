@@ -77,14 +77,32 @@ CLIENT_SECRET = os.environ.get("SHOPIFY_CLIENT_SECRET", "REMPLACE_MOI_client_sec
 # ID/Secret propres), on peut quand meme les preciser individuellement via
 # SHOPIFY_CLIENT_ID_2/3/4 et SHOPIFY_CLIENT_SECRET_2/3/4 - sinon, par
 # defaut, ils reprennent ceux d'Unipap's (CLIENT_ID / CLIENT_SECRET).
-SHOPIFY_STORES = [{"shop": SHOP, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}]
+def _default_store_name(shop_domain):
+    """Nom lisible par defaut a partir du domaine .myshopify.com, si aucun
+    nom explicite n'est fourni (ex: "noeudspapillon.myshopify.com" ->
+    "Noeudspapillon")."""
+    base = shop_domain.split(".")[0]
+    return base.replace("-", " ").replace("_", " ").strip().title()
+
+
+SHOPIFY_STORES = [
+    {
+        "shop": SHOP,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "name": os.environ.get("SHOPIFY_STORE_NAME", "").strip() or "Unipap's",
+    }
+]
 for _i in (2, 3, 4):
     _shop = os.environ.get(f"SHOPIFY_STORE_{_i}", "").strip()
     if not _shop:
         continue
     _cid = os.environ.get(f"SHOPIFY_CLIENT_ID_{_i}", "").strip() or CLIENT_ID
     _csecret = os.environ.get(f"SHOPIFY_CLIENT_SECRET_{_i}", "").strip() or CLIENT_SECRET
-    SHOPIFY_STORES.append({"shop": _shop, "client_id": _cid, "client_secret": _csecret})
+    _name = os.environ.get(f"SHOPIFY_STORE_NAME_{_i}", "").strip() or _default_store_name(_shop)
+    SHOPIFY_STORES.append(
+        {"shop": _shop, "client_id": _cid, "client_secret": _csecret, "name": _name}
+    )
 
 # Gmail (mails non lus dans la boite de reception)
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -261,6 +279,7 @@ _cache = {
     "gmail_label_counts": {},
     "revenue_by_country": {},
     "revenue_totals": {},
+    "a_traiter_by_store": {},
     "updated_at": None,
     "error": None,
 }
@@ -678,11 +697,14 @@ def refresh_cache():
         precommandes = 0
         commandes_du_jour = 0
         carriers = {label: {"emoji": emoji, "count": 0} for emoji, label, _tag in CARRIERS}
+        a_traiter_by_store = {}
         for store in SHOPIFY_STORES:
             try:
                 store_token = get_access_token_for(store)
                 shop_name = store["shop"]
-                a_traiter += count_orders(store_token, a_traiter_filter, shop=shop_name)
+                store_a_traiter = count_orders(store_token, a_traiter_filter, shop=shop_name)
+                a_traiter += store_a_traiter
+                a_traiter_by_store[store["name"]] = store_a_traiter
                 precommandes += count_orders(
                     store_token, 'status:"open" tag:"Précommande"', shop=shop_name
                 )
@@ -729,6 +751,7 @@ def refresh_cache():
 
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
+            _cache["a_traiter_by_store"] = a_traiter_by_store
             _cache["precommandes"] = precommandes
             _cache["carriers"] = carriers
             _cache["commandes_du_jour"] = commandes_du_jour
@@ -786,6 +809,7 @@ def render_html():
     refresh_seconds = current_refresh_seconds()
     with _cache_lock:
         a_traiter = _cache["a_traiter"]
+        a_traiter_by_store = dict(_cache["a_traiter_by_store"])
         precommandes = _cache["precommandes"]
         carriers = dict(_cache["carriers"])
         commandes_du_jour = _cache["commandes_du_jour"]
@@ -900,6 +924,23 @@ def render_html():
     </div>"""
     else:
         gmail_24h_senders_card = ""
+
+    # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
+    # des commandes a traiter par boutique, dans le meme style que la liste
+    # des expediteurs des mails +24h.
+    now_for_stores = datetime.now(ZoneInfo(TIMEZONE))
+    if now_for_stores.hour >= PREDICTION_HOUR and a_traiter_by_store:
+        store_chips = "".join(
+            f'<span class="sender-chip">{name} : {count} commande{"s" if count != 1 else ""}</span>'
+            for name, count in a_traiter_by_store.items()
+        )
+        a_traiter_by_store_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">Commandes à traiter par boutique</div>
+      <div class="sender-list">{store_chips}</div>
+    </div>"""
+    else:
+        a_traiter_by_store_card = ""
 
     gmail_label_max = max([c for c in gmail_label_counts.values() if c] + [1])
     gmail_label_rows = ""
@@ -1222,6 +1263,8 @@ def render_html():
       {prediction_card}
       {prediction_temps_card}
     </div>
+
+    {a_traiter_by_store_card}
 
     <div class="carriers-card">
       <div class="carriers-title">Commandes par transporteur <span>(à traiter uniquement)</span></div>
