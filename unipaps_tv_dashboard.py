@@ -345,10 +345,9 @@ def get_shopify_orders_last_30j(token):
 
 def compute_revenue_by_country_group(orders):
     """A partir de la liste d'orders (get_shopify_orders_last_30j), calcule
-    pour chaque groupe de pays (COUNTRY_GROUPS) le CA TTC sur 30 jours, et
-    pour les groupes de COUNTRY_GROUPS_DETAILED, egalement sur 7 jours et
-    sur la journee d'hier (calendaire, fuseau TIMEZONE). Renvoie
-    {indicatif: {"30j": float, "7j": float|None, "veille": float|None}}."""
+    pour chaque groupe de pays (COUNTRY_GROUPS) le CA TTC sur 30 jours, sur
+    7 jours et sur la journee d'hier (calendaire, fuseau TIMEZONE). Renvoie
+    {indicatif: {"30j": float, "7j": float, "veille": float}}."""
     now = datetime.now(ZoneInfo(TIMEZONE))
     since_7j = now - timedelta(days=7)
     yesterday_date = (now - timedelta(days=1)).date()
@@ -367,14 +366,11 @@ def compute_revenue_by_country_group(orders):
                 total_7j += o["amount"]
             if o["created_at"].date() == yesterday_date:
                 total_veille += o["amount"]
-        entry = {"30j": round(total_30j, 2)}
-        if label in COUNTRY_GROUPS_DETAILED:
-            entry["7j"] = round(total_7j, 2)
-            entry["veille"] = round(total_veille, 2)
-        else:
-            entry["7j"] = None
-            entry["veille"] = None
-        result[label] = entry
+        result[label] = {
+            "30j": round(total_30j, 2),
+            "7j": round(total_7j, 2),
+            "veille": round(total_veille, 2),
+        }
     return result
 
 
@@ -845,8 +841,23 @@ def render_html():
     def fmt_eur(value):
         return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
 
+    ADS_MIN_CA_30J = 500.0
+
+    def _ads_row(display_name, entry):
+        return f"""
+        <tr>
+          <td>{display_name}</td>
+          <td>{fmt_eur(entry.get("30j"))}</td>
+          <td>{fmt_eur(entry.get("7j"))}</td>
+          <td>{fmt_eur(entry.get("veille"))}</td>
+          <td class="ads-indispo">En attente API Ads</td>
+          <td class="ads-indispo">—</td>
+        </tr>"""
+
     ads_rows = ""
-    for label in ["FR"] + [c for c in COUNTRY_GROUPS if c != "FR"]:
+    others_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
+    has_others = False
+    for label in COUNTRY_GROUPS:
         display_name = COUNTRY_DISPLAY_NAMES.get(label, label)
         entry = revenue_by_country.get(label)
         if entry is None:
@@ -856,22 +867,15 @@ def render_html():
           <td colspan="4" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
-        ca_30j = entry.get("30j")
-        ca_7j = entry.get("7j")
-        ca_veille = entry.get("veille")
-        detail_cols = ""
-        if label in COUNTRY_GROUPS_DETAILED:
-            detail_cols = f"<td>{fmt_eur(ca_7j)}</td><td>{fmt_eur(ca_veille)}</td>"
-        else:
-            detail_cols = "<td>—</td><td>—</td>"
-        ads_rows += f"""
-        <tr>
-          <td>{display_name}</td>
-          <td>{fmt_eur(ca_30j)}</td>
-          {detail_cols}
-          <td class="ads-indispo">En attente API Ads</td>
-          <td class="ads-indispo">—</td>
-        </tr>"""
+        if label != "FR" and entry.get("30j", 0) < ADS_MIN_CA_30J:
+            has_others = True
+            for key in others_totals:
+                others_totals[key] += entry.get(key) or 0
+            continue
+        ads_rows += _ads_row(display_name, entry)
+
+    if has_others:
+        ads_rows += _ads_row("🌍 Autres pays", {k: round(v, 2) for k, v in others_totals.items()})
 
     ads_card = f"""
     <div class="carriers-card">
