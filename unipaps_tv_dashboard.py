@@ -311,7 +311,15 @@ def _parse_sender_name(from_header):
 def get_gmail_unread_older_than_24h():
     """Nombre + liste des expediteurs des conversations non lues dans
     l'onglet Principale dont le dernier message recu date de plus de 24h.
-    Renvoie (total, [noms d'expediteurs]) ou (None, None) si indisponible."""
+    Renvoie (total, [noms d'expediteurs]) ou (None, None) si indisponible.
+
+    On interroge au niveau MESSAGE (pas "fil de discussion") : la recherche
+    Gmail "is:unread" au niveau fil peut renvoyer des resultats perimes
+    (un fil que Gmail affiche encore comme non lu dans la recherche, alors
+    qu'aucun message individuel n'est reellement marque non lu et que
+    l'interface ne l'affiche plus en gras). La recherche au niveau message
+    reflete l'etat reel affiche a l'ecran.
+    """
     access_token = get_gmail_access_token()
     if access_token is None:
         return None, None
@@ -323,81 +331,59 @@ def get_gmail_unread_older_than_24h():
     cutoff_epoch = int(
         (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(hours=24)).timestamp()
     )
-    query = f"in:inbox is:unread category:primary before:{cutoff_epoch}"
+    query = f"in:inbox is:unread category:primary -from:me before:{cutoff_epoch}"
 
     headers = {"Authorization": f"Bearer {access_token}"}
-    total = 0
-    senders = []
+    message_ids = []
     page_token = None
     while True:
         params = {"q": query, "maxResults": 500}
         if page_token:
             params["pageToken"] = page_token
         resp = requests.get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/threads",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
             headers=headers,
             params=params,
             timeout=20,
         )
         resp.raise_for_status()
         data = resp.json()
-        threads = data.get("threads", [])
-        total += len(threads)
-
-        # On ne recupere le detail (expediteur) que pour un nombre
-        # raisonnable de conversations, pour eviter trop d'appels API.
-        for thread in threads:
-            if len(senders) >= 30:
-                break
-            try:
-                t_resp = requests.get(
-                    f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{thread['id']}",
-                    headers=headers,
-                    params={"format": "metadata", "metadataHeaders": "From"},
-                    timeout=20,
-                )
-                t_resp.raise_for_status()
-                messages = t_resp.json().get("messages", [])
-
-                # On cible le message qui justifie l'alerte, par ordre de
-                # preference decroissant (certains fils sont "non lus" au
-                # niveau du fil sans qu'aucun message individuel ne porte
-                # l'etiquette UNREAD - decalage d'indexation Gmail connu -
-                # donc on ne peut pas se fier uniquement a UNREAD) :
-                #   1) message externe (pas de nous) + UNREAD + avant cutoff
-                #   2) message externe (pas de nous) + avant cutoff
-                #   3) dernier message externe (pas de nous) du fil
-                #   4) en dernier recours, le dernier message du fil
-                cutoff_ms = cutoff_epoch * 1000
-                non_self = [m for m in messages if "SENT" not in m.get("labelIds", [])]
-
-                candidates = [
-                    m for m in non_self
-                    if "UNREAD" in m.get("labelIds", [])
-                    and int(m.get("internalDate", "0")) < cutoff_ms
-                ]
-                if not candidates:
-                    candidates = [
-                        m for m in non_self
-                        if int(m.get("internalDate", "0")) < cutoff_ms
-                    ]
-                if not candidates:
-                    candidates = non_self
-                target = candidates[-1] if candidates else (messages[-1] if messages else None)
-
-                if target:
-                    payload_headers = target.get("payload", {}).get("headers", [])
-                    from_header = next(
-                        (h["value"] for h in payload_headers if h["name"] == "From"), None
-                    )
-                    senders.append(_parse_sender_name(from_header))
-            except Exception:  # noqa: BLE001
-                pass
-
+        message_ids.extend(m["id"] for m in data.get("messages", []))
         page_token = data.get("nextPageToken")
         if not page_token:
             break
-    return total, senders
+
+    # On deduplique par conversation (thread) : un meme fil peut avoir
+    # plusieurs vieux messages non lus, on ne veut le compter/afficher
+    # qu'une fois. On recupere les details (expediteur) de chaque message
+    # pour construire le total exact (nombre de fils distincts) et la liste
+    # des expediteurs (limitee a 30 pour l'affichage).
+    seen_threads = set()
+    senders = []
+    for msg_id in message_ids[:200]:  # garde-fou anti-emballement d'appels API
+        try:
+            m_resp = requests.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": "From"},
+                timeout=20,
+            )
+            m_resp.raise_for_status()
+            m_data = m_resp.json()
+            thread_id = m_data.get("threadId")
+            if thread_id in seen_threads:
+                continue
+            seen_threads.add(thread_id)
+            if len(senders) < 30:
+                payload_headers = m_data.get("payload", {}).get("headers", [])
+                from_header = next(
+                    (h["value"] for h in payload_headers if h["name"] == "From"), None
+                )
+                senders.append(_parse_sender_name(from_header))
+        except Exception:  # noqa: BLE001
+            pass
+
+    return len(seen_threads), senders
 
 
 def refresh_cache():
