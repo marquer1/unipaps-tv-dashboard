@@ -1559,38 +1559,62 @@ def refresh_cache(startup=False):
         # CA Shopify par pays : isole dans son propre try/except, comme
         # pour Gmail, pour ne pas casser le reste du dashboard.
         #
-        # ShopifyQL (shopifyqlQuery) : l'acces "Protected customer data"
-        # niveau 2 (bloque un temps par un bug Shopify sur les apps creees
-        # via le nouveau Dev Dashboard) est desormais disponible - verifie
-        # en direct. On utilise donc les chiffres ShopifyQL, qui
-        # correspondent exactement a Shopify Analytics, plutot que la
-        # reconstruction manuelle via l'API Orders classique (qui ne
-        # collait jamais parfaitement, notamment sur les annulations et
-        # modifications de commande).
+        # ShopifyQL (shopifyqlQuery) : accessible depuis une session
+        # d'outillage Shopify (verifie en direct), mais TOUJOURS refuse en
+        # ACCESS_DENIED pour le token de cette app precise (client_credentials,
+        # meme boutique) - donc le bug "Protected customer data access
+        # niveau 2 indisponible pour une app creee via le nouveau Dev
+        # Dashboard" n'est pas resolu pour cette app specifiquement. On
+        # tente quand meme ShopifyQL en premier (chiffres exacts si l'acces
+        # est un jour debloque), et on retombe sur la reconstruction
+        # manuelle via l'API Orders classique en cas d'echec, plutot que
+        # d'afficher des zeros.
         try:
             revenue_totals, refund_totals = get_sales_summary_ql(token)
             revenue_by_country = get_sales_by_country_ql(token)
         except Exception as revenue_exc:  # noqa: BLE001
-            revenue_by_country = {}
-            revenue_totals = {}
-            refund_totals = {}
-            print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
+            print(f"[CA/pays] ShopifyQL indisponible, fallback API Orders : {revenue_exc}", flush=True)
+            try:
+                orders_30j = get_shopify_orders_last_30j(token)
+                cancelled_30j = get_cancelled_orders_last_30j(token)
+                closed_returns_30j = get_closed_returns_last_30j(token)
+                revenue_by_country = compute_revenue_by_country_group(orders_30j)
+                revenue_totals = compute_revenue_totals(orders_30j)
+                refund_totals = compute_refund_totals(cancelled_30j, closed_returns_30j)
+            except Exception as revenue_fallback_exc:  # noqa: BLE001
+                revenue_by_country = {}
+                revenue_totals = {}
+                refund_totals = {}
+                print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_fallback_exc}", flush=True)
 
         # Taux de remboursement des 30 jours PRECEDENTS (J-60 a J-30), pour
-        # la carte de comparaison dans l'onglet SAV - egalement via
-        # ShopifyQL.
+        # la carte de comparaison dans l'onglet SAV - meme logique
+        # ShopifyQL + fallback API Orders que ci-dessus.
         try:
             net_ca_prev, refunded_prev = get_sales_summary_prev_ql(token)
             revenue_totals_prev = {"30j": net_ca_prev}
             refund_totals_prev = {"30j": refunded_prev}
         except Exception as revenue_prev_exc:  # noqa: BLE001
-            revenue_totals_prev = {}
-            refund_totals_prev = {}
-            print(f"[CA/pays] Erreur lors du calcul du CA J-60/J-30 : {revenue_prev_exc}", flush=True)
+            print(f"[CA/pays] ShopifyQL indisponible (J-60/J-30), fallback API Orders : {revenue_prev_exc}", flush=True)
+            try:
+                orders_prev_30j = get_shopify_orders_prev_30j(token)
+                cancelled_prev_30j = get_cancelled_orders_prev_30j(token)
+                closed_returns_prev_30j = get_closed_returns_prev_30j(token)
+                net_ca_prev, refunded_prev = compute_simple_totals_prev_30j(
+                    orders_prev_30j, cancelled_prev_30j, closed_returns_prev_30j
+                )
+                revenue_totals_prev = {"30j": net_ca_prev}
+                refund_totals_prev = {"30j": refunded_prev}
+            except Exception as revenue_prev_fallback_exc:  # noqa: BLE001
+                revenue_totals_prev = {}
+                refund_totals_prev = {}
+                print(f"[CA/pays] Erreur lors du calcul du CA J-60/J-30 : {revenue_prev_fallback_exc}", flush=True)
 
         # Tableau mensuel du taux de remboursement, annee en cours vs
-        # annee precedente : recalcule au plus une fois par jour (requete
-        # plus lourde, historique complet), via ShopifyQL.
+        # annee precedente : necessite ShopifyQL (l'API Orders classique
+        # n'a pas assez d'historique) - recalcule au plus une fois par
+        # jour. Reste vide tant que l'acces ShopifyQL n'est pas debloque
+        # pour cette app.
         today_str = datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
         if startup or monthly_refund_computed_date == today_str:
@@ -1602,7 +1626,7 @@ def refresh_cache(startup=False):
                 monthly_refund_computed_date = today_str
             except Exception as monthly_exc:  # noqa: BLE001
                 monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-                print(f"[CA/pays] Erreur lors du calcul du tableau mensuel : {monthly_exc}", flush=True)
+                print(f"[CA/pays] Erreur lors du calcul du tableau mensuel (ShopifyQL indisponible) : {monthly_exc}", flush=True)
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
