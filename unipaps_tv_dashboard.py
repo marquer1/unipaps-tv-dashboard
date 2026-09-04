@@ -1977,17 +1977,30 @@ def render_html():
       </div>
     </div>"""
 
+    def _ads_spend_card(label, value):
+        value_txt = fmt_eur(value) if ads_api_live else "En attente API Ads"
+        size = "18px" if not ads_api_live else "22px"
+        return f"""
+    <div class="card">
+      <div class="icon-box icon-blue">📣</div>
+      <div>
+        <div class="stat-label">{label}</div>
+        <div class="stat-value blue" style="font-size:{size};">{value_txt}</div>
+      </div>
+    </div>"""
+
     ads_summary_cards = f"""
-    <div class="grid-ads">
-      {_ca_card("CA total 30 jours", ca_total_30j, "💰")}
+    <div class="grid-ads-3">
+      {_ca_card("CA TTC 30 jours", ca_total_30j, "💰")}
+      {_ads_spend_card("Dépenses Google Ads 30 jours", ads_total_30j)}
       {_ratio_card("Ratio Ads/CA HT 30 jours", ca_total_30j, ads_total_30j)}
     </div>"""
 
     ads_summary_cards_below = f"""
-    <div class="grid-ads">
-      {_ca_card("CA total 7 jours", ca_total_7j, "💰")}
+    <div class="grid-ads-4">
+      {_ca_card("CA TTC 7 jours", ca_total_7j, "💰")}
       {_ratio_card("Ratio Ads/CA HT 7 jours", ca_total_7j, ads_total_7j)}
-      {_ca_card("CA total hier", ca_total_veille, "💰")}
+      {_ca_card("CA TTC hier", ca_total_veille, "💰")}
       {_ratio_card("Ratio Ads/CA HT hier", ca_total_veille, ads_total_veille)}
     </div>"""
 
@@ -1999,7 +2012,7 @@ def render_html():
         <thead>
           <tr>
             <th>Pays</th>
-            <th>CA 30j</th>
+            <th>CA TTC 30J</th>
             <th>Dépenses Google Ads</th>
             <th>Ratio Ads/CA HT</th>
           </tr>
@@ -2104,15 +2117,19 @@ def render_html():
   .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom-3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-ads {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 18px; }}
-  .grid-ads .card {{ padding: 14px 16px; gap: 10px; }}
-  .grid-ads .icon-box {{ width: 40px; height: 40px; font-size: 20px; border-radius: 10px; }}
-  .grid-ads .stat-label {{ font-size: 11px; }}
-  .grid-ads .stat-value {{ font-size: 22px; }}
+  .grid-ads-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }}
+  .grid-ads-3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 18px; }}
+  .grid-ads-4 {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; margin-bottom: 18px; }}
+  .grid-ads .card, .grid-ads-2 .card, .grid-ads-3 .card, .grid-ads-4 .card {{ padding: 14px 16px; gap: 10px; }}
+  .grid-ads .icon-box, .grid-ads-2 .icon-box, .grid-ads-3 .icon-box, .grid-ads-4 .icon-box {{ width: 40px; height: 40px; font-size: 20px; border-radius: 10px; }}
+  .grid-ads .stat-label, .grid-ads-2 .stat-label, .grid-ads-3 .stat-label, .grid-ads-4 .stat-label {{ font-size: 11px; }}
+  .grid-ads .stat-value, .grid-ads-2 .stat-value, .grid-ads-3 .stat-value, .grid-ads-4 .stat-value {{ font-size: 22px; }}
 
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
     .grid-top, .grid-bottom-2, .grid-bottom-3 {{ grid-template-columns: 1fr; }}
-    .grid-ads {{ grid-template-columns: 1fr 1fr; gap: 10px; }}
+    .grid-ads, .grid-ads-4 {{ grid-template-columns: 1fr 1fr; gap: 10px; }}
+    .grid-ads-2, .grid-ads-3 {{ grid-template-columns: 1fr; gap: 10px; }}
     .carrier-row {{ grid-template-columns: 1fr 34px; grid-template-areas: "label count" "bar bar"; row-gap: 4px; }}
     .carrier-label {{ grid-area: label; }}
     .carrier-count {{ grid-area: count; }}
