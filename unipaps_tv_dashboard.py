@@ -373,7 +373,11 @@ query($query: String!, $cursor: String) {
       node {
         createdAt
         cancelledAt
-        currentTotalPriceSet { shopMoney { amount } }
+        currentSubtotalPriceSet { shopMoney { amount } }
+        currentShippingPriceSet { shopMoney { amount } }
+        currentTotalTaxSet { shopMoney { amount } }
+        currentTotalDutiesSet { shopMoney { amount } }
+        currentTotalAdditionalFeesSet { shopMoney { amount } }
         totalPriceSet { shopMoney { amount } }
         totalRefundedSet { shopMoney { amount } }
         shippingAddress { countryCodeV2 }
@@ -656,12 +660,33 @@ def compute_monthly_refund_rates(orders, cancelled_orders, closed_returns, curre
     return result
 
 
+def _order_total_sales(node):
+    """Calcule "Ventes totales" au sens Shopify pour une commande :
+    ventes nettes (currentSubtotalPriceSet, deja net des annulations/
+    retours/reductions) + frais supplementaires + droits de douane + frais
+    d'expedition + taxes - exactement la formule affichee par Shopify
+    ("Ventes totales = ventes nettes + frais supplementaires + droits de
+    douane + frais d'expedition + taxes"), plutot que de se fier
+    aveuglement a currentTotalPriceSet (qui doit normalement donner le
+    meme resultat, mais peut diverger selon les cas - pourboires, etc.)."""
+    def _amt(field):
+        return float((node.get(field) or {}).get("shopMoney", {}).get("amount", 0) or 0)
+
+    return (
+        _amt("currentSubtotalPriceSet")
+        + _amt("currentShippingPriceSet")
+        + _amt("currentTotalTaxSet")
+        + _amt("currentTotalDutiesSet")
+        + _amt("currentTotalAdditionalFeesSet")
+    )
+
+
 def get_shopify_orders_last_30j(token):
     """Recupere les commandes des 30 derniers jours (tous statuts, cf.
-    status:any) avec leur montant TTC (deduit des remboursements/
-    annulations via currentTotalPriceSet) et le pays de livraison. La
-    valeur annulee est calculee a part par get_cancelled_orders_last_30j,
-    sur la date d'annulation. Renvoie une liste de dicts
+    status:any) avec leur montant TTC ("Ventes totales" au sens Shopify,
+    cf. _order_total_sales) et le pays de livraison. La valeur annulee est
+    calculee a part par get_cancelled_orders_last_30j, sur la date
+    d'annulation. Renvoie une liste de dicts
     {created_at: datetime, country: str|None, amount: float}."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
@@ -697,7 +722,7 @@ def get_shopify_orders_last_30j(token):
                 continue
             shipping = node.get("shippingAddress") or {}
             country = shipping.get("countryCodeV2")
-            amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
+            amount = _order_total_sales(node)
             orders.append({"created_at": created_at, "country": country, "amount": amount})
         if block["pageInfo"]["hasNextPage"]:
             cursor = block["pageInfo"]["endCursor"]
@@ -1473,15 +1498,17 @@ def render_html():
     else:
         gmail_24h_senders_card = ""
 
-    # Taux de remboursement (30j) : montant rembourse / CA brut (CA net
-    # affiche + montant rembourse, puisque currentTotalPriceSet est deja
-    # net des remboursements). Seuils de couleur indicatifs, ajustables
-    # ici si besoin.
+    # Taux de remboursement (30j) : montant rembourse / CA. Le CA utilise
+    # ici est EXACTEMENT le meme que partout ailleurs sur le dashboard
+    # (revenue_totals["30j"], "Ventes totales" au sens Shopify = ventes
+    # nettes + frais + taxes + douane, deja net des annulations/retours) -
+    # on n'y rajoute plus le montant rembourse pour "reconstituer" un CA
+    # brut, ce qui ne correspondait a aucun chiffre affiche par ailleurs
+    # (ex : onglet Ads) et creait un CA different d'une carte a l'autre.
     refunded_30j = refund_totals.get("30j") or 0
     net_ca_30j = revenue_totals.get("30j") or 0
-    gross_ca_30j = net_ca_30j + refunded_30j
-    if gross_ca_30j:
-        refund_pct = 100 * refunded_30j / gross_ca_30j
+    if net_ca_30j:
+        refund_pct = 100 * refunded_30j / net_ca_30j
         refund_pct_txt = f"{refund_pct:.1f}%".replace(".", ",")
         if refund_pct <= 3:
             refund_color = "green"
@@ -1503,7 +1530,7 @@ def render_html():
           <div class="divider"></div>
           <div>
             <div class="stat-sub">{fmt_eur(refunded_30j)}</div>
-            <div class="stat-sub-label">Remboursés / {fmt_eur(gross_ca_30j)} CA</div>
+            <div class="stat-sub-label">Remboursés / {fmt_eur(net_ca_30j)} CA</div>
           </div>
         </div>
       </div>
