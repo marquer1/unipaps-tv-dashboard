@@ -2056,14 +2056,14 @@ def render_html():
 
     ads_card = f"""
     <div class="carriers-card">
-      <div class="carriers-title">CA TTC &amp; DÉPENSES GOOGLE ADS PAR PAYS</div>
+      <div class="carriers-title">CA TTC &amp; DÉPENSES GOOGLE ADS PAR PAYS &mdash; 30 DERNIERS JOURS</div>
       <div style="overflow-x:auto;">
       <table class="ads-table">
         <thead>
           <tr>
             <th>Pays</th>
             <th>Commandes</th>
-            <th>CA TTC 30J</th>
+            <th>CA TTC</th>
             <th>Dépenses Google Ads</th>
             <th>Ratio Ads/CA HT</th>
           </tr>
