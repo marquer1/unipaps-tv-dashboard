@@ -295,6 +295,9 @@ _cache = {
     "gmail_label_counts": {},
     "revenue_by_country": {},
     "revenue_totals": {},
+    "refund_totals": {},
+    "monthly_refund_rates": [],
+    "monthly_refund_computed_date": None,
     "ads_spend_by_country": {},
     "a_traiter_by_store": {},
     "updated_at": None,
@@ -370,6 +373,7 @@ query($query: String!, $cursor: String) {
       node {
         createdAt
         currentTotalPriceSet { shopMoney { amount } }
+        totalRefundedSet { shopMoney { amount } }
         shippingAddress { countryCodeV2 }
       }
     }
@@ -378,12 +382,107 @@ query($query: String!, $cursor: String) {
 }
 """
 
+# Requete allegee (pas de pays de livraison) pour l'historique des
+# remboursements par mois, qui porte sur ~2 ans de commandes plutot que
+# les 30 derniers jours.
+ORDERS_REFUND_HISTORY_QUERY = """
+query($query: String!, $cursor: String) {
+  orders(first: 250, after: $cursor, query: $query) {
+    edges {
+      cursor
+      node {
+        createdAt
+        currentTotalPriceSet { shopMoney { amount } }
+        totalRefundedSet { shopMoney { amount } }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def get_shopify_orders_since(token, start_date):
+    """Recupere toutes les commandes (hors annulees) depuis start_date,
+    avec leur montant net et rembourse uniquement (pas de pays de
+    livraison, requete allegee car le volume peut couvrir ~2 ans de
+    commandes). Sert au tableau mensuel des taux de remboursement.
+    Renvoie une liste de dicts {created_at: datetime, amount: float,
+    refunded: float}."""
+    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    search_query = f"created_at:>='{start_date.isoformat()}' -status:cancelled"
+
+    orders = []
+    cursor = None
+    while True:
+        payload = {
+            "query": ORDERS_REFUND_HISTORY_QUERY,
+            "variables": {"query": search_query, "cursor": cursor},
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data:
+            raise RuntimeError(str(data["errors"]))
+        block = data["data"]["orders"]
+        for edge in block["edges"]:
+            node = edge["node"]
+            try:
+                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+            except (TypeError, ValueError):
+                continue
+            amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
+            refunded = float((node.get("totalRefundedSet") or {}).get("shopMoney", {}).get("amount", 0) or 0)
+            orders.append({"created_at": created_at, "amount": amount, "refunded": refunded})
+        if block["pageInfo"]["hasNextPage"]:
+            cursor = block["pageInfo"]["endCursor"]
+        else:
+            break
+    return orders
+
+
+def compute_monthly_refund_rates(orders, current_year):
+    """A partir d'une liste d'orders (get_shopify_orders_since, depuis le
+    1er janvier de l'annee precedente), calcule le taux de remboursement
+    (rembourse / CA brut) par mois, annee en cours vs annee precedente.
+    Renvoie une liste de 12 dicts (janvier a decembre, dans l'ordre) :
+    {"month": int, "rate_cur": float|None, "rate_prev": float|None}."""
+    buckets = {}
+    for o in orders:
+        key = (o["created_at"].year, o["created_at"].month)
+        b = buckets.setdefault(key, {"net": 0.0, "refunded": 0.0})
+        b["net"] += o["amount"]
+        b["refunded"] += o.get("refunded") or 0
+
+    def _rate(bucket):
+        if not bucket:
+            return None
+        gross = bucket["net"] + bucket["refunded"]
+        if not gross:
+            return None
+        return 100 * bucket["refunded"] / gross
+
+    result = []
+    for month in range(1, 13):
+        result.append(
+            {
+                "month": month,
+                "rate_cur": _rate(buckets.get((current_year, month))),
+                "rate_prev": _rate(buckets.get((current_year - 1, month))),
+            }
+        )
+    return result
+
 
 def get_shopify_orders_last_30j(token):
     """Recupere les commandes des 30 derniers jours (peu importe le statut,
-    hors annulees) avec leur montant TTC (deduit des remboursements) et le
-    pays de livraison. Renvoie une liste de dicts
-    {created_at: datetime, country: str|None, amount: float}."""
+    hors annulees) avec leur montant TTC (deduit des remboursements), le
+    montant rembourse et le pays de livraison. Renvoie une liste de dicts
+    {created_at: datetime, country: str|None, amount: float, refunded: float}."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
@@ -415,7 +514,10 @@ def get_shopify_orders_last_30j(token):
             shipping = node.get("shippingAddress") or {}
             country = shipping.get("countryCodeV2")
             amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
-            orders.append({"created_at": created_at, "country": country, "amount": amount})
+            refunded = float((node.get("totalRefundedSet") or {}).get("shopMoney", {}).get("amount", 0) or 0)
+            orders.append(
+                {"created_at": created_at, "country": country, "amount": amount, "refunded": refunded}
+            )
         if block["pageInfo"]["hasNextPage"]:
             cursor = block["pageInfo"]["endCursor"]
         else:
@@ -471,6 +573,31 @@ def compute_revenue_totals(orders):
             total_7j += o["amount"]
         if o["created_at"].date() == yesterday_date:
             total_veille += o["amount"]
+    return {
+        "30j": round(total_30j, 2),
+        "7j": round(total_7j, 2),
+        "veille": round(total_veille, 2),
+    }
+
+
+def compute_refund_totals(orders):
+    """Montant rembourse total, tous pays confondus, sur 30j/7j/veille -
+    meme decoupage que compute_revenue_totals. Renvoie
+    {"30j": float, "7j": float, "veille": float}."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
+    yesterday_date = (now - timedelta(days=1)).date()
+
+    total_30j = total_7j = total_veille = 0.0
+    for o in orders:
+        refunded = o.get("refunded") or 0
+        if not refunded:
+            continue
+        total_30j += refunded
+        if o["created_at"] >= since_7j:
+            total_7j += refunded
+        if o["created_at"].date() == yesterday_date:
+            total_veille += refunded
     return {
         "30j": round(total_30j, 2),
         "7j": round(total_7j, 2),
@@ -818,7 +945,7 @@ def get_gmail_unread_older_than_24h():
     return len(seen_threads), senders
 
 
-def refresh_cache():
+def refresh_cache(startup=False):
     try:
         token = get_access_token()
 
@@ -907,10 +1034,42 @@ def refresh_cache():
             orders_30j = get_shopify_orders_last_30j(token)
             revenue_by_country = compute_revenue_by_country_group(orders_30j)
             revenue_totals = compute_revenue_totals(orders_30j)
+            refund_totals = compute_refund_totals(orders_30j)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
             revenue_totals = {}
+            refund_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
+
+        # Taux de remboursement mensuel (annee en cours vs annee
+        # precedente) : porte sur ~2 ans de commandes, donc beaucoup plus
+        # lourd que le CA 30j. Recalcule une seule fois par jour (pas a
+        # chaque cycle de refresh_cache, qui tourne toutes les
+        # REFRESH_MINUTES) pour ne pas multiplier inutilement les appels
+        # a l'API Shopify sur un gros volume de commandes. Jamais calcule
+        # au demarrage (startup=True, appele une seule fois de maniere
+        # synchrone par main() avant que le serveur HTTP n'ecoute) : sur
+        # une grosse boutique, aller chercher ~2 ans de commandes pourrait
+        # retarder l'ouverture du port et faire echouer le healthcheck /
+        # timeout de deploiement sur Render. Le premier cycle en tache de
+        # fond (background_refresher) s'en charge quelques minutes plus
+        # tard, sans bloquer personne.
+        monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
+        if startup or monthly_refund_computed_date == today:
+            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+        else:
+            try:
+                history_start = datetime(now.year - 1, 1, 1, tzinfo=ZoneInfo(TIMEZONE))
+                history_orders = get_shopify_orders_since(token, history_start)
+                monthly_refund_rates = compute_monthly_refund_rates(history_orders, now.year)
+                monthly_refund_computed_date = today
+            except Exception as history_exc:  # noqa: BLE001
+                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+                monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
+                print(
+                    f"[Remboursements/mois] Erreur lors du calcul de l'historique : {history_exc}",
+                    flush=True,
+                )
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
@@ -942,6 +1101,9 @@ def refresh_cache():
             _cache["gmail_label_counts"] = gmail_label_counts
             _cache["revenue_by_country"] = revenue_by_country
             _cache["revenue_totals"] = revenue_totals
+            _cache["refund_totals"] = refund_totals
+            _cache["monthly_refund_rates"] = monthly_refund_rates
+            _cache["monthly_refund_computed_date"] = monthly_refund_computed_date
             _cache["ads_spend_by_country"] = ads_spend_by_country
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
@@ -1001,6 +1163,8 @@ def render_html():
         gmail_label_counts = dict(_cache["gmail_label_counts"])
         revenue_by_country = dict(_cache["revenue_by_country"])
         revenue_totals = dict(_cache["revenue_totals"])
+        refund_totals = dict(_cache["refund_totals"])
+        monthly_refund_rates = list(_cache["monthly_refund_rates"])
         ads_spend_by_country = dict(_cache["ads_spend_by_country"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
@@ -1107,6 +1271,102 @@ def render_html():
     </div>"""
     else:
         gmail_24h_senders_card = ""
+
+    # Taux de remboursement (30j) : montant rembourse / CA brut (CA net
+    # affiche + montant rembourse, puisque currentTotalPriceSet est deja
+    # net des remboursements). Seuils de couleur indicatifs, ajustables
+    # ici si besoin.
+    refunded_30j = refund_totals.get("30j") or 0
+    net_ca_30j = revenue_totals.get("30j") or 0
+    gross_ca_30j = net_ca_30j + refunded_30j
+    if gross_ca_30j:
+        refund_pct = 100 * refunded_30j / gross_ca_30j
+        refund_pct_txt = f"{refund_pct:.1f}%".replace(".", ",")
+        if refund_pct <= 3:
+            refund_color = "green"
+        elif refund_pct <= 7:
+            refund_color = "orange"
+        else:
+            refund_color = "red"
+    else:
+        refund_pct_txt = "—"
+        refund_color = "purple"
+
+    refund_ratio_card = f"""
+    <div class="card">
+      <div class="icon-box icon-purple">💸</div>
+      <div>
+        <div class="stat-label">Taux de remboursement (30j)</div>
+        <div class="stat-row">
+          <div class="stat-value {refund_color}">{refund_pct_txt}</div>
+          <div class="divider"></div>
+          <div>
+            <div class="stat-sub">{fmt_eur(refunded_30j)}</div>
+            <div class="stat-sub-label">Remboursés / {fmt_eur(gross_ca_30j)} CA</div>
+          </div>
+        </div>
+      </div>
+    </div>"""
+
+    # Tableau mensuel du taux de remboursement, annee en cours vs annee
+    # precedente (janvier a decembre). Presente en 2 blocs de 6 mois cote
+    # a cote pour rester compact en hauteur sur l'ecran TV plutot qu'une
+    # liste verticale de 12 lignes.
+    MONTH_LABELS_FR = [
+        "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
+        "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
+    ]
+    current_year = now.year
+
+    def _month_pct(rate):
+        if rate is None:
+            return "—"
+        return f"{rate:.1f}%".replace(".", ",")
+
+    def _month_pill(rate):
+        if rate is None:
+            return '<span class="ratio-pill ratio-neutral">—</span>'
+        if rate <= 3:
+            color = "ratio-good"
+        elif rate <= 7:
+            color = "ratio-mid"
+        else:
+            color = "ratio-bad"
+        return f'<span class="ratio-pill {color}">{_month_pct(rate)}</span>'
+
+    def _month_row(entry):
+        label = MONTH_LABELS_FR[entry["month"] - 1]
+        return f"""
+        <tr>
+          <td>{label}</td>
+          <td class="month-prev">{_month_pct(entry["rate_prev"])}</td>
+          <td>{_month_pill(entry["rate_cur"])}</td>
+        </tr>"""
+
+    if len(monthly_refund_rates) == 12:
+        months_h1 = monthly_refund_rates[0:6]
+        months_h2 = monthly_refund_rates[6:12]
+
+        def _month_table(months):
+            rows = "".join(_month_row(e) for e in months)
+            return f"""
+        <table class="month-table">
+          <thead>
+            <tr><th>Mois</th><th>{current_year - 1}</th><th>{current_year}</th></tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>"""
+
+        monthly_refund_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">Taux de remboursement par mois &mdash; {current_year} vs {current_year - 1}</div>
+      <div class="month-tables">
+        {_month_table(months_h1)}
+        {_month_table(months_h2)}
+      </div>
+    </div>"""
+    else:
+        monthly_refund_card = ""
 
     # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
     # des commandes a traiter par boutique, dans le meme style que la liste
@@ -1405,6 +1665,7 @@ def render_html():
   .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
+  .grid-bottom-3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-ads {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 18px; }}
   .grid-ads .card {{ padding: 14px 16px; gap: 10px; }}
   .grid-ads .icon-box {{ width: 40px; height: 40px; font-size: 20px; border-radius: 10px; }}
@@ -1413,7 +1674,7 @@ def render_html():
 
   @media (max-width: 700px) {{
     .wrap {{ padding: 16px 16px 28px; min-height: 0; justify-content: flex-start; }}
-    .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }}
+    .grid-top, .grid-bottom-2, .grid-bottom-3 {{ grid-template-columns: 1fr; }}
     .grid-ads {{ grid-template-columns: 1fr 1fr; gap: 10px; }}
     .carrier-row {{ grid-template-columns: 1fr 34px; grid-template-areas: "label count" "bar bar"; row-gap: 4px; }}
     .carrier-label {{ grid-area: label; }}
@@ -1459,6 +1720,14 @@ def render_html():
   .ratio-mid {{ background: #fdf1dc; color: #b3701a; }}
   .ratio-bad {{ background: #fde4e4; color: #c23434; }}
   .ratio-neutral {{ background: #eef1f7; color: #8b95a5; }}
+  .month-tables {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }}
+  .month-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  .month-table th {{ text-align: left; font-size: 11px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 6px 8px; border-bottom: 2px solid #e5e9f0; }}
+  .month-table th:not(:first-child), .month-table td:not(:first-child) {{ text-align: right; }}
+  .month-table td {{ padding: 6px 8px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
+  .month-table tr:last-child td {{ border-bottom: none; }}
+  .month-prev {{ color: #8b95a5; font-weight: 500; }}
+  @media (max-width: 700px) {{ .month-tables {{ grid-template-columns: 1fr; }} }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -1479,6 +1748,7 @@ def render_html():
   .stat-value.green {{ color: #2fa860; }}
   .stat-value.purple {{ color: #6c4fd6; }}
   .stat-value.blue {{ color: #2b7fe0; }}
+  .stat-value.red {{ color: #c23434; }}
   .stat-row {{ display: flex; align-items: baseline; gap: 12px; }}
   .stat-sub {{ display: flex; align-items: baseline; gap: 6px; font-size: 20px; font-weight: 700; color: #e8792b; }}
   .stat-sub.purple {{ color: #6c4fd6; }}
@@ -1502,7 +1772,7 @@ def render_html():
 
   .updated {{ text-align: center; font-size: 13px; color: #8b95a5; margin-top: 2px; }}
   .error {{ background: #fbe0e0; color: #a52323; text-align: center; padding: 10px; font-size: 15px; border-radius: 10px; margin-bottom: 12px; }}
-  @media (max-width: 1100px) {{ .grid-top, .grid-bottom-2 {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
+  @media (max-width: 1100px) {{ .grid-top, .grid-bottom-2, .grid-bottom-3 {{ grid-template-columns: 1fr; }} .carrier-row {{ grid-template-columns: 180px 1fr 40px; }} }}
 
   .brand-header {{ display: flex; flex-direction: column; align-items: center; margin-bottom: 8px; }}
   .brand-logo {{ height: 145px; width: auto; display: block; }}
@@ -1579,12 +1849,14 @@ def render_html():
   </div>
 
   <div id="tab-sav" class="tab-panel" hidden>
-    <div class="grid-bottom-2">
+    <div class="grid-bottom-3">
       {gmail_card}
       {gmail_24h_card}
+      {refund_ratio_card}
     </div>
     {gmail_labels_card}
     {gmail_24h_senders_card}
+    {monthly_refund_card}
   </div>
 
   <div id="tab-ads" class="tab-panel" hidden>
@@ -1731,7 +2003,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     if CLIENT_ID.startswith("REMPLACE_MOI") or CLIENT_SECRET.startswith("REMPLACE_MOI"):
         print("!! Pense a definir SHOPIFY_CLIENT_ID et SHOPIFY_CLIENT_SECRET !!")
-    refresh_cache()
+    refresh_cache(startup=True)
     t = threading.Thread(target=background_refresher, daemon=True)
     t.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
