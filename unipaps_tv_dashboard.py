@@ -526,13 +526,23 @@ def get_cancelled_orders(token, start_date):
     aujourd'hui, elle doit alors compter comme une annulation d'aujourd'hui
     (c'est ainsi que Shopify calcule sa ligne "Annulations de commande").
     Renvoie une liste de dicts {cancelled_at: datetime, amount: float}
-    (amount = totalPriceSet, la valeur d'origine de la commande)."""
+    (amount = totalPriceSet, la valeur d'origine de la commande).
+
+    IMPORTANT (bug corrige) : "cancelled_at" n'est PAS un filtre de date
+    reconnu par la recherche Shopify - passe en parametre de query, il est
+    silencieusement ignore et l'API renvoie des commandes annulees au
+    hasard (verifie en interrogeant directement l'API : renvoyait des
+    commandes annulees remontant a 2023 au lieu de se limiter a la fenetre
+    demandee). On filtre donc sur updated_at (une annulation met forcement
+    a jour la commande, cf. get_closed_returns qui utilise la meme
+    technique pour les retours), puis on verifie cancelled_at >= start_date
+    cote code avant de garder chaque commande."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
         "Content-Type": "application/json",
     }
-    search_query = f"cancelled_at:>='{start_date.isoformat()}' status:cancelled"
+    search_query = f"updated_at:>='{start_date.isoformat()}' status:cancelled"
 
     orders = []
     cursor = None
@@ -553,6 +563,8 @@ def get_cancelled_orders(token, start_date):
                 cancelled_at = datetime.fromisoformat(node["cancelledAt"]).astimezone(ZoneInfo(TIMEZONE))
             except (TypeError, ValueError):
                 continue
+            if cancelled_at < start_date:
+                continue  # commande annulee avant la fenetre, juste "touchee" depuis
             amount = float(node["totalPriceSet"]["shopMoney"]["amount"])
             orders.append({"cancelled_at": cancelled_at, "amount": amount})
         if block["pageInfo"]["hasNextPage"]:
@@ -662,23 +674,199 @@ def compute_monthly_refund_rates(orders, cancelled_orders, closed_returns, curre
 
 def _order_total_sales(node):
     """Calcule "Ventes totales" au sens Shopify pour une commande :
-    ventes nettes (currentSubtotalPriceSet, deja net des annulations/
-    retours/reductions) + frais supplementaires + droits de douane + frais
-    d'expedition + taxes - exactement la formule affichee par Shopify
-    ("Ventes totales = ventes nettes + frais supplementaires + droits de
-    douane + frais d'expedition + taxes"), plutot que de se fier
-    aveuglement a currentTotalPriceSet (qui doit normalement donner le
-    meme resultat, mais peut diverger selon les cas - pourboires, etc.)."""
+    ventes nettes (HORS taxes) + frais supplementaires + droits de douane +
+    frais d'expedition + taxes - exactement la formule affichee par
+    Shopify ("Ventes totales = ventes nettes + frais supplementaires +
+    droits de douane + frais d'expedition + taxes").
+
+    Piege verifie sur des commandes reelles : currentSubtotalPriceSet
+    INCLUT DEJA la taxe (ex : commande a 15,99 subtotal + 2,99 shipping =
+    18,98 de total, sans taxe additionnelle alors que currentTotalTaxSet
+    vaut 3,17 sur cette meme commande) - ce n'est PAS le "ventes nettes"
+    hors taxes que decrit la formule Shopify. Il faut donc soustraire la
+    taxe de currentSubtotalPriceSet pour obtenir le vrai "ventes nettes"
+    avant de rajouter les taxes, sous peine de compter la taxe deux fois
+    (bug precedent : total gonfle d'exactement le montant des taxes)."""
     def _amt(field):
         return float((node.get(field) or {}).get("shopMoney", {}).get("amount", 0) or 0)
 
+    tax = _amt("currentTotalTaxSet")
+    net_sales_ht = _amt("currentSubtotalPriceSet") - tax
+
     return (
-        _amt("currentSubtotalPriceSet")
+        net_sales_ht
         + _amt("currentShippingPriceSet")
-        + _amt("currentTotalTaxSet")
+        + tax
         + _amt("currentTotalDutiesSet")
         + _amt("currentTotalAdditionalFeesSet")
     )
+
+
+# ---------------------------------------------------------------------
+# ShopifyQL (shopifyqlQuery, scope read_reports) : donne EXACTEMENT les
+# memes chiffres que Shopify Analytics ("Ventes totales", "Annulations de
+# ventes"...), calcules par Shopify lui-meme plutot que reconstruits a la
+# main a partir des champs de commande (remboursements, retours,
+# annulations et modifications de commande melanges de facon non triviale
+# - verifie a plusieurs reprises : aucune reconstruction manuelle ne
+# retombait exactement sur les chiffres Shopify). Necessite le scope
+# read_reports sur l'app personnalisee.
+# ---------------------------------------------------------------------
+
+COUNTRY_NAME_TO_CODE = {
+    "France": "FR",
+    "Belgium": "BE",
+    "Germany": "DE",
+    "Spain": "ES",
+    "Italy": "IT",
+    "Netherlands": "NL",
+    "Sweden": "SE",
+    "Portugal": "PT",
+    "Austria": "AT",
+    "Denmark": "DK",
+    "Finland": "FI",
+    "Poland": "PL",
+    "Czechia": "CZ",
+    "Czech Republic": "CZ",
+}
+
+
+def run_shopifyql(token, query):
+    """Execute une requete ShopifyQL via le champ shopifyqlQuery de l'API
+    Admin GraphQL (scope read_reports) et renvoie une liste de dicts, une
+    entree par ligne de resultat, cle par nom de colonne."""
+    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    gql = """
+    query($q: String!) {
+      shopifyqlQuery(query: $q) {
+        tableData { columns { name } rows }
+        parseErrors
+      }
+    }
+    """
+    resp = requests.post(url, headers=headers, json={"query": gql, "variables": {"q": query}}, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    if "errors" in data:
+        raise RuntimeError(str(data["errors"]))
+    result = data["data"]["shopifyqlQuery"]
+    if result.get("parseErrors"):
+        raise RuntimeError(f"ShopifyQL parse error: {result['parseErrors']}")
+    table = result.get("tableData") or {}
+    columns = [c["name"] for c in (table.get("columns") or [])]
+    rows = table.get("rows") or []
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def _sales_window_clause(window):
+    """Traduit "30j"/"7j"/"veille" en clause SINCE/UNTIL ShopifyQL. Les
+    fenetres 30j/7j sont relatives et s'arretent a hier (comme le reste du
+    dashboard) ; "veille" utilise une date absolue calculee en Python car
+    "SINCE -1d UNTIL -1d" renvoie systematiquement des resultats vides
+    cote ShopifyQL (verifie - bug/limitation de l'API, une plage a un seul
+    jour releatif ne fonctionne pas, une plage a date absolue si)."""
+    if window == "30j":
+        return "SINCE -30d UNTIL -1d"
+    if window == "7j":
+        return "SINCE -7d UNTIL -1d"
+    if window == "veille":
+        yesterday = (datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=1)).strftime("%Y-%m-%d")
+        return f"SINCE {yesterday} UNTIL {yesterday}"
+    raise ValueError(window)
+
+
+def get_sales_summary_ql(token):
+    """CA total et valeur annulee/remboursee ("Annulations de ventes" au
+    sens Shopify), sur 30j/7j/veille, via ShopifyQL - donc identiques a ce
+    qu'affiche Shopify Analytics. Renvoie (revenue_totals, refund_totals),
+    chacun {"30j": float, "7j": float, "veille": float}."""
+    revenue_totals = {}
+    refund_totals = {}
+    for window in ("30j", "7j", "veille"):
+        clause = _sales_window_clause(window)
+        rows = run_shopifyql(token, f"FROM sales SHOW total_sales, sales_reversals {clause}")
+        row = rows[0] if rows else {}
+        revenue_totals[window] = round(float(row.get("total_sales") or 0), 2)
+        refund_totals[window] = round(abs(float(row.get("sales_reversals") or 0)), 2)
+    return revenue_totals, refund_totals
+
+
+def get_sales_by_country_ql(token):
+    """CA par groupe de pays (COUNTRY_GROUPS), sur 30j/7j/veille pour les
+    groupes de COUNTRY_GROUPS_DETAILED (France), sur 30j uniquement pour
+    les autres - via ShopifyQL, groupe par pays de livraison (correspond a
+    ce qu'utilisait deja le dashboard). Renvoie
+    {indicatif: {"30j": float, "7j": float, "veille": float}}."""
+    result = {label: {"30j": 0.0, "7j": 0.0, "veille": 0.0} for label in COUNTRY_GROUPS}
+    for window in ("30j", "7j", "veille"):
+        if window != "30j":
+            # Seuls les groupes "detailles" (France) ont besoin du detail
+            # 7j/veille - on ne refait la requete par pays que pour ceux-la.
+            pass
+        clause = _sales_window_clause(window)
+        rows = run_shopifyql(
+            token, f"FROM sales SHOW total_sales GROUP BY shipping_country {clause}"
+        )
+        for row in rows:
+            code = COUNTRY_NAME_TO_CODE.get(row.get("shipping_country") or "")
+            if not code:
+                continue
+            for label, countries in COUNTRY_GROUPS.items():
+                if code in countries:
+                    if window == "30j" or label in COUNTRY_GROUPS_DETAILED:
+                        result[label][window] += float(row.get("total_sales") or 0)
+    for label in result:
+        for k in result[label]:
+            result[label][k] = round(result[label][k], 2)
+    return result
+
+
+def get_monthly_refund_rates_ql(token, current_year):
+    """Taux de remboursement/annulation par mois (janvier a decembre),
+    annee en cours vs annee precedente, via ShopifyQL (TIMESERIES month) -
+    contrairement a l'API Orders classique (limitee a ~60 jours
+    d'historique sur cette boutique), ShopifyQL/read_reports donne acces a
+    l'historique complet. Renvoie une liste de 12 dicts :
+    {"month": int, "rate_cur": float|None, "rate_prev": float|None}."""
+    history_start = f"{current_year - 1}-01-01"
+    rows = run_shopifyql(
+        token,
+        f"FROM sales SHOW net_sales, sales_reversals TIMESERIES month "
+        f"SINCE {history_start} UNTIL -1d",
+    )
+    buckets = {}
+    for row in rows:
+        month_str = row.get("month") or ""
+        try:
+            year, month = int(month_str[0:4]), int(month_str[5:7])
+        except (ValueError, IndexError):
+            continue
+        net = float(row.get("net_sales") or 0)
+        reversed_ = abs(float(row.get("sales_reversals") or 0))
+        buckets[(year, month)] = {"net": net, "refunded": reversed_}
+
+    def _rate(bucket):
+        if not bucket:
+            return None
+        gross = bucket["net"] + bucket["refunded"]
+        if not gross:
+            return None
+        return 100 * bucket["refunded"] / gross
+
+    result = []
+    for month in range(1, 13):
+        result.append(
+            {
+                "month": month,
+                "rate_cur": _rate(buckets.get((current_year, month))),
+                "rate_prev": _rate(buckets.get((current_year - 1, month))),
+            }
+        )
+    return result
 
 
 def get_shopify_orders_last_30j(token):
@@ -1271,14 +1459,16 @@ def refresh_cache(startup=False):
             print(f"[Gmail] Erreur lors de la recuperation des libelles : {gmail_exc}", flush=True)
 
         # CA Shopify par pays : isole dans son propre try/except, comme
-        # pour Gmail, pour ne pas casser le reste du dashboard.
+        # pour Gmail, pour ne pas casser le reste du dashboard. Utilise
+        # ShopifyQL (shopifyqlQuery, scope read_reports) plutot qu'une
+        # reconstruction manuelle a partir des champs de commande - cf.
+        # get_sales_summary_ql / get_sales_by_country_ql : ce sont
+        # EXACTEMENT les memes chiffres que Shopify Analytics (Ventes
+        # totales, Annulations de ventes...), verifie face a face avec le
+        # rapport natif Shopify.
         try:
-            orders_30j = get_shopify_orders_last_30j(token)
-            cancelled_30j = get_cancelled_orders_last_30j(token)
-            closed_returns_30j = get_closed_returns_last_30j(token)
-            revenue_by_country = compute_revenue_by_country_group(orders_30j)
-            revenue_totals = compute_revenue_totals(orders_30j)
-            refund_totals = compute_refund_totals(cancelled_30j, closed_returns_30j)
+            revenue_totals, refund_totals = get_sales_summary_ql(token)
+            revenue_by_country = get_sales_by_country_ql(token)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
             revenue_totals = {}
@@ -1286,13 +1476,26 @@ def refresh_cache(startup=False):
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
         # Taux de remboursement mensuel (annee en cours vs annee
-        # precedente) retire : l'API Shopify de cette boutique ne renvoie
-        # que les commandes recentes (~60 jours), rendant l'historique 2
-        # ans peu fiable (mois manquants). On ne calcule plus cet
-        # historique du tout (economise des appels API inutiles) ; seul le
-        # taux sur 30 jours reste affiche, calcule plus haut.
-        monthly_refund_rates = []
+        # precedente) : de retour, via ShopifyQL (get_monthly_refund_rates_ql)
+        # qui donne acces a l'historique complet (pas la limite ~60 jours
+        # de l'API Orders classique). Recalcule une seule fois par jour
+        # (pas a chaque cycle de refresh_cache) pour rester leger ; jamais
+        # au demarrage (startup=True) pour ne pas retarder le healthcheck
+        # Render.
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
+        if startup or monthly_refund_computed_date == today:
+            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+        else:
+            try:
+                monthly_refund_rates = get_monthly_refund_rates_ql(token, now.year)
+                monthly_refund_computed_date = today
+            except Exception as monthly_exc:  # noqa: BLE001
+                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+                monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
+                print(
+                    f"[Remboursements/mois] Erreur ShopifyQL : {monthly_exc}",
+                    flush=True,
+                )
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
@@ -1536,12 +1739,67 @@ def render_html():
       </div>
     </div>"""
 
-    # Tableau mensuel du taux de remboursement retire : l'API Shopify de
-    # cette boutique ne renvoie que les commandes recentes (~60 jours),
-    # donc l'historique 2 ans necessaire (annee en cours vs precedente)
-    # n'est pas fiable. On garde uniquement le taux sur 30 jours (carte
-    # refund_ratio_card ci-dessus).
-    monthly_refund_card = ""
+    # Tableau mensuel du taux de remboursement, annee en cours vs annee
+    # precedente (janvier a decembre), calcule via ShopifyQL (donc fiable
+    # sur tout l'historique, contrairement a l'ancienne version basee sur
+    # l'API Orders classique). Presente en 2 blocs de 6 mois cote a cote
+    # pour rester compact en hauteur sur l'ecran TV plutot qu'une liste
+    # verticale de 12 lignes.
+    MONTH_LABELS_FR = [
+        "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
+        "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
+    ]
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+
+    def _month_pct(rate):
+        if rate is None:
+            return "—"
+        return f"{rate:.1f}%".replace(".", ",")
+
+    def _month_pill(rate):
+        if rate is None:
+            return '<span class="ratio-pill ratio-neutral">—</span>'
+        if rate <= 3:
+            color = "ratio-good"
+        elif rate <= 7:
+            color = "ratio-mid"
+        else:
+            color = "ratio-bad"
+        return f'<span class="ratio-pill {color}">{_month_pct(rate)}</span>'
+
+    def _month_row(entry):
+        label = MONTH_LABELS_FR[entry["month"] - 1]
+        return f"""
+        <tr>
+          <td>{label}</td>
+          <td class="month-prev">{_month_pct(entry["rate_prev"])}</td>
+          <td>{_month_pill(entry["rate_cur"])}</td>
+        </tr>"""
+
+    if len(monthly_refund_rates) == 12:
+        months_h1 = monthly_refund_rates[0:6]
+        months_h2 = monthly_refund_rates[6:12]
+
+        def _month_table(months):
+            rows = "".join(_month_row(e) for e in months)
+            return f"""
+        <table class="month-table">
+          <thead>
+            <tr><th>Mois</th><th>{current_year - 1}</th><th>{current_year}</th></tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>"""
+
+        monthly_refund_card = f"""
+    <div class="carriers-card">
+      <div class="carriers-title">Taux de remboursement par mois &mdash; {current_year} vs {current_year - 1}</div>
+      <div class="month-tables">
+        {_month_table(months_h1)}
+        {_month_table(months_h2)}
+      </div>
+    </div>"""
+    else:
+        monthly_refund_card = ""
 
     # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
     # des commandes a traiter par boutique, dans le meme style que la liste
