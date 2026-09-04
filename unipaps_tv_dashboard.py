@@ -795,11 +795,25 @@ def get_sales_summary_ql(token):
     refund_totals = {}
     for window in ("30j", "7j", "veille"):
         clause = _sales_window_clause(window)
-        rows = run_shopifyql(token, f"FROM sales SHOW total_sales, sales_reversals {clause}")
+        rows = run_shopifyql(token, f"FROM sales SHOW total_sales, returns {clause}")
         row = rows[0] if rows else {}
         revenue_totals[window] = round(float(row.get("total_sales") or 0), 2)
-        refund_totals[window] = round(abs(float(row.get("sales_reversals") or 0)), 2)
+        refund_totals[window] = round(abs(float(row.get("returns") or 0)), 2)
     return revenue_totals, refund_totals
+
+
+def get_sales_summary_prev_ql(token):
+    """CA total et valeur annulee/remboursee sur la periode des 30 jours
+    PRECEDENTS (J-60 a J-30), via ShopifyQL - pour la carte de comparaison
+    de l'onglet SAV. Renvoie (net_ca, refunded)."""
+    yesterday = datetime.now(ZoneInfo(TIMEZONE)) - timedelta(days=1)
+    since = (yesterday - timedelta(days=59)).strftime("%Y-%m-%d")
+    until = (yesterday - timedelta(days=30)).strftime("%Y-%m-%d")
+    rows = run_shopifyql(token, f"FROM sales SHOW total_sales, returns SINCE {since} UNTIL {until}")
+    row = rows[0] if rows else {}
+    net_ca = round(float(row.get("total_sales") or 0), 2)
+    refunded = round(abs(float(row.get("returns") or 0)), 2)
+    return net_ca, refunded
 
 
 def get_sales_by_country_ql(token):
@@ -842,7 +856,7 @@ def get_monthly_refund_rates_ql(token, current_year):
     history_start = f"{current_year - 1}-01-01"
     rows = run_shopifyql(
         token,
-        f"FROM sales SHOW net_sales, sales_reversals TIMESERIES month "
+        f"FROM sales SHOW net_sales, returns TIMESERIES month "
         f"SINCE {history_start} UNTIL -1d",
     )
     buckets = {}
@@ -853,7 +867,7 @@ def get_monthly_refund_rates_ql(token, current_year):
         except (ValueError, IndexError):
             continue
         net = float(row.get("net_sales") or 0)
-        reversed_ = abs(float(row.get("sales_reversals") or 0))
+        reversed_ = abs(float(row.get("returns") or 0))
         buckets[(year, month)] = {"net": net, "refunded": reversed_}
 
     def _rate(bucket):
@@ -1545,22 +1559,17 @@ def refresh_cache(startup=False):
         # CA Shopify par pays : isole dans son propre try/except, comme
         # pour Gmail, pour ne pas casser le reste du dashboard.
         #
-        # ShopifyQL (shopifyqlQuery) abandonne : necessite le scope
-        # read_reports ET l'approbation "Protected customer data access"
-        # niveau 2, qui n'est pas accessible pour une app creee via le
-        # nouveau Dev Dashboard (bug Shopify connu, confirme sur cette
-        # app - n'apparait pas dans le Partner Dashboard pour faire la
-        # demande). Retour a la reconstruction manuelle via l'API Orders
-        # classique (moins precise que Shopify Analytics sur les
-        # annulations/retours, mais fonctionnelle sans permission
-        # bloquante).
+        # ShopifyQL (shopifyqlQuery) : l'acces "Protected customer data"
+        # niveau 2 (bloque un temps par un bug Shopify sur les apps creees
+        # via le nouveau Dev Dashboard) est desormais disponible - verifie
+        # en direct. On utilise donc les chiffres ShopifyQL, qui
+        # correspondent exactement a Shopify Analytics, plutot que la
+        # reconstruction manuelle via l'API Orders classique (qui ne
+        # collait jamais parfaitement, notamment sur les annulations et
+        # modifications de commande).
         try:
-            orders_30j = get_shopify_orders_last_30j(token)
-            cancelled_30j = get_cancelled_orders_last_30j(token)
-            closed_returns_30j = get_closed_returns_last_30j(token)
-            revenue_by_country = compute_revenue_by_country_group(orders_30j)
-            revenue_totals = compute_revenue_totals(orders_30j)
-            refund_totals = compute_refund_totals(cancelled_30j, closed_returns_30j)
+            revenue_totals, refund_totals = get_sales_summary_ql(token)
+            revenue_by_country = get_sales_by_country_ql(token)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
             revenue_totals = {}
@@ -1568,15 +1577,10 @@ def refresh_cache(startup=False):
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
         # Taux de remboursement des 30 jours PRECEDENTS (J-60 a J-30), pour
-        # la carte de comparaison dans l'onglet SAV. Isole dans son propre
-        # try/except, meme logique que le bloc ci-dessus.
+        # la carte de comparaison dans l'onglet SAV - egalement via
+        # ShopifyQL.
         try:
-            orders_prev_30j = get_shopify_orders_prev_30j(token)
-            cancelled_prev_30j = get_cancelled_orders_prev_30j(token)
-            closed_returns_prev_30j = get_closed_returns_prev_30j(token)
-            net_ca_prev, refunded_prev = compute_simple_totals_prev_30j(
-                orders_prev_30j, cancelled_prev_30j, closed_returns_prev_30j
-            )
+            net_ca_prev, refunded_prev = get_sales_summary_prev_ql(token)
             revenue_totals_prev = {"30j": net_ca_prev}
             refund_totals_prev = {"30j": refunded_prev}
         except Exception as revenue_prev_exc:  # noqa: BLE001
@@ -1584,14 +1588,21 @@ def refresh_cache(startup=False):
             refund_totals_prev = {}
             print(f"[CA/pays] Erreur lors du calcul du CA J-60/J-30 : {revenue_prev_exc}", flush=True)
 
-        # Tableau mensuel du taux de remboursement retire (a nouveau) :
-        # ShopifyQL est bloque (cf. ci-dessus) et l'API Orders classique
-        # ne renvoie que les commandes recentes (~60 jours) sur cette
-        # boutique, donc l'historique 2 ans (2025 inclus) n'est pas
-        # fiable. Seul le taux 30 jours reste affiche (carte
-        # refund_ratio_card, calculee plus haut).
-        monthly_refund_rates = []
+        # Tableau mensuel du taux de remboursement, annee en cours vs
+        # annee precedente : recalcule au plus une fois par jour (requete
+        # plus lourde, historique complet), via ShopifyQL.
+        today_str = datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
+        if startup or monthly_refund_computed_date == today_str:
+            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+        else:
+            try:
+                current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+                monthly_refund_rates = get_monthly_refund_rates_ql(token, current_year)
+                monthly_refund_computed_date = today_str
+            except Exception as monthly_exc:  # noqa: BLE001
+                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
+                print(f"[CA/pays] Erreur lors du calcul du tableau mensuel : {monthly_exc}", flush=True)
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
