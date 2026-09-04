@@ -1394,7 +1394,6 @@ def render_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{refresh_seconds}">
 <title>A2C Digital - Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
@@ -1593,9 +1592,51 @@ def render_html():
     {ads_card}
   </div>
 
-  <div class="updated">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
+  <div class="updated" id="updated-label">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
 </div>
 <script>
+  // Rafraichissement silencieux : au lieu d'un <meta http-equiv="refresh">
+  // qui recharge toute la page (flash blanc + "saut" visible sur l'ecran
+  // TV a chaque cycle), on va chercher le HTML a jour en arriere-plan et
+  // on remplace juste le contenu de .wrap en place. Comme ce <script> est
+  // en dehors de .wrap, il n'est jamais lui-meme remplace : les timers et
+  // variables ci-dessous restent vivants d'un cycle a l'autre.
+  var REFRESH_MS = {refresh_seconds} * 1000;
+  var _refreshFailCount = 0;
+
+  function refreshContent() {{
+    fetch(location.href, {{ cache: 'no-store' }})
+      .then(function(res) {{
+        if (!res.ok) {{ throw new Error('HTTP ' + res.status); }}
+        return res.text();
+      }})
+      .then(function(html) {{
+        _refreshFailCount = 0;
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var newWrap = doc.querySelector('.wrap');
+        var curWrap = document.querySelector('.wrap');
+        if (!newWrap || !curWrap) {{ return; }}
+        var activeBtn = document.querySelector('.tab-btn-active');
+        var activeTab = activeBtn ? activeBtn.getAttribute('data-tab') : null;
+        curWrap.innerHTML = newWrap.innerHTML;
+        // Le HTML frais recalcule un onglet "par defaut" cote serveur ;
+        // on reapplique l'onglet reellement affiche cote client pour ne
+        // pas provoquer un saut d'onglet au passage.
+        if (activeTab) {{ showTab(activeTab); }}
+      }})
+      .catch(function(err) {{
+        _refreshFailCount++;
+        console.warn('[dashboard] echec du rafraichissement silencieux', err);
+        // Filet de securite : si plusieurs cycles echouent d'affilee
+        // (redemarrage serveur, coupure reseau...), on retente un vrai
+        // rechargement complet plutot que de rester bloque avec des
+        // donnees perimees indefiniment.
+        if (_refreshFailCount >= 5) {{ location.reload(); }}
+      }});
+  }}
+
+  setInterval(refreshContent, REFRESH_MS);
+
   var _autoRotateTimer = null;
   var _tabOrder = ['commandes', 'sav', 'ads'];
   var ROTATE_MS = 10000;
