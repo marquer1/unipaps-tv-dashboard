@@ -1430,31 +1430,31 @@ def render_html():
   }}
   .tab-btn-active {{ background: linear-gradient(90deg, #f6c877, #eba54b); color: #ffffff; border-color: #eba54b; }}
 
-  .ads-table {{ width: 100%; border-collapse: collapse; font-size: 17px; min-width: 640px; }}
-  .ads-table th {{ text-align: left; font-size: 13px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 12px 16px; border-bottom: 2px solid #e5e9f0; }}
-  .ads-table td {{ padding: 14px 16px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
+  .ads-table {{ width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }}
+  .ads-table th {{ text-align: left; font-size: 12px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 8px 16px; border-bottom: 2px solid #e5e9f0; }}
+  .ads-table td {{ padding: 8px 16px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
   .ads-table tr:last-child td {{ border-bottom: none; }}
   .ads-table tbody tr:nth-child(even) {{ background: #f7f9fd; }}
   .ads-table tbody tr:hover {{ background: #eef4ff; }}
-  .country-name {{ font-size: 17px; font-weight: 700; color: #1f2733; }}
+  .country-name {{ font-size: 15px; font-weight: 700; color: #1f2733; }}
   .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
   .ads-pct {{ color: #8b95a5; font-weight: 500; font-size: 13px; }}
   .ca-cell {{ min-width: 220px; }}
   .ca-bar-wrap {{
-    position: relative; height: 30px; border-radius: 8px;
+    position: relative; height: 24px; border-radius: 7px;
     background: #eef1f7; overflow: hidden; display: flex; align-items: center;
   }}
   .ca-bar {{
     position: absolute; left: 0; top: 0; bottom: 0;
     background: linear-gradient(90deg, #bfe6cd, #6fcf97);
-    border-radius: 8px;
+    border-radius: 7px;
   }}
   .ca-bar-value {{
     position: relative; z-index: 1; padding: 0 10px; color: #1c5c33; font-weight: 700;
   }}
   .ratio-pill {{
-    display: inline-block; padding: 5px 12px; border-radius: 999px;
-    font-weight: 800; font-size: 15px;
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-weight: 800; font-size: 14px;
   }}
   .ratio-good {{ background: #e3f6ea; color: #1c8a4b; }}
   .ratio-mid {{ background: #fdf1dc; color: #b3701a; }}
