@@ -1587,46 +1587,12 @@ def refresh_cache(startup=False):
                 refund_totals = {}
                 print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_fallback_exc}", flush=True)
 
-        # Taux de remboursement des 30 jours PRECEDENTS (J-60 a J-30), pour
-        # la carte de comparaison dans l'onglet SAV - meme logique
-        # ShopifyQL + fallback API Orders que ci-dessus.
-        try:
-            net_ca_prev, refunded_prev = get_sales_summary_prev_ql(token)
-            revenue_totals_prev = {"30j": net_ca_prev}
-            refund_totals_prev = {"30j": refunded_prev}
-        except Exception as revenue_prev_exc:  # noqa: BLE001
-            print(f"[CA/pays] ShopifyQL indisponible (J-60/J-30), fallback API Orders : {revenue_prev_exc}", flush=True)
-            try:
-                orders_prev_30j = get_shopify_orders_prev_30j(token)
-                cancelled_prev_30j = get_cancelled_orders_prev_30j(token)
-                closed_returns_prev_30j = get_closed_returns_prev_30j(token)
-                net_ca_prev, refunded_prev = compute_simple_totals_prev_30j(
-                    orders_prev_30j, cancelled_prev_30j, closed_returns_prev_30j
-                )
-                revenue_totals_prev = {"30j": net_ca_prev}
-                refund_totals_prev = {"30j": refunded_prev}
-            except Exception as revenue_prev_fallback_exc:  # noqa: BLE001
-                revenue_totals_prev = {}
-                refund_totals_prev = {}
-                print(f"[CA/pays] Erreur lors du calcul du CA J-60/J-30 : {revenue_prev_fallback_exc}", flush=True)
-
-        # Tableau mensuel du taux de remboursement, annee en cours vs
-        # annee precedente : necessite ShopifyQL (l'API Orders classique
-        # n'a pas assez d'historique) - recalcule au plus une fois par
-        # jour. Reste vide tant que l'acces ShopifyQL n'est pas debloque
-        # pour cette app.
-        today_str = datetime.now(ZoneInfo(TIMEZONE)).date().isoformat()
+        # Remboursements retires de l'onglet SAV (donnees non fiables via
+        # l'API Orders classique, et ShopifyQL reste bloque pour cette app -
+        # cf. discussions precedentes). On ne calcule donc plus ni le taux
+        # 30j/30j precedents, ni le tableau mensuel.
+        monthly_refund_rates = []
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-        if startup or monthly_refund_computed_date == today_str:
-            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-        else:
-            try:
-                current_year = datetime.now(ZoneInfo(TIMEZONE)).year
-                monthly_refund_rates = get_monthly_refund_rates_ql(token, current_year)
-                monthly_refund_computed_date = today_str
-            except Exception as monthly_exc:  # noqa: BLE001
-                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-                print(f"[CA/pays] Erreur lors du calcul du tableau mensuel (ShopifyQL indisponible) : {monthly_exc}", flush=True)
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
@@ -1658,9 +1624,6 @@ def refresh_cache(startup=False):
             _cache["gmail_label_counts"] = gmail_label_counts
             _cache["revenue_by_country"] = revenue_by_country
             _cache["revenue_totals"] = revenue_totals
-            _cache["refund_totals"] = refund_totals
-            _cache["revenue_totals_prev"] = revenue_totals_prev
-            _cache["refund_totals_prev"] = refund_totals_prev
             _cache["monthly_refund_rates"] = monthly_refund_rates
             _cache["monthly_refund_computed_date"] = monthly_refund_computed_date
             _cache["ads_spend_by_country"] = ads_spend_by_country
@@ -1725,9 +1688,6 @@ def render_html():
         gmail_label_counts = dict(_cache["gmail_label_counts"])
         revenue_by_country = dict(_cache["revenue_by_country"])
         revenue_totals = dict(_cache["revenue_totals"])
-        refund_totals = dict(_cache["refund_totals"])
-        revenue_totals_prev = dict(_cache["revenue_totals_prev"])
-        refund_totals_prev = dict(_cache["refund_totals_prev"])
         monthly_refund_rates = list(_cache["monthly_refund_rates"])
         ads_spend_by_country = dict(_cache["ads_spend_by_country"])
         updated_at = _cache["updated_at"] or "..."
@@ -1836,138 +1796,13 @@ def render_html():
     else:
         gmail_24h_senders_card = ""
 
-    # Taux de remboursement (30j) : montant rembourse / CA. Le CA utilise
-    # ici est EXACTEMENT le meme que partout ailleurs sur le dashboard
-    # (revenue_totals["30j"], "Ventes totales" au sens Shopify = ventes
-    # nettes + frais + taxes + douane, deja net des annulations/retours) -
-    # on n'y rajoute plus le montant rembourse pour "reconstituer" un CA
-    # brut, ce qui ne correspondait a aucun chiffre affiche par ailleurs
-    # (ex : onglet Ads) et creait un CA different d'une carte a l'autre.
-    refunded_30j = refund_totals.get("30j") or 0
-    net_ca_30j = revenue_totals.get("30j") or 0
-    if net_ca_30j:
-        refund_pct = 100 * refunded_30j / net_ca_30j
-        refund_pct_txt = f"{refund_pct:.1f}%".replace(".", ",")
-        if refund_pct <= 3:
-            refund_color = "green"
-        elif refund_pct <= 7:
-            refund_color = "orange"
-        else:
-            refund_color = "red"
-    else:
-        refund_pct_txt = "—"
-        refund_color = "purple"
-
-    refund_ratio_card = f"""
-    <div class="card">
-      <div class="icon-box icon-purple">💸</div>
-      <div>
-        <div class="stat-label">Taux de remboursement (30j)</div>
-        <div class="stat-row">
-          <div class="stat-value {refund_color}">{refund_pct_txt}</div>
-          <div class="divider"></div>
-          <div>
-            <div class="stat-sub">{fmt_eur(refunded_30j)}</div>
-            <div class="stat-sub-label">Remboursés / {fmt_eur(net_ca_30j)} CA</div>
-          </div>
-        </div>
-      </div>
-    </div>"""
-
-    # Meme carte, mais pour les 30 jours PRECEDENTS (J-60 a J-30), pour
-    # comparer visuellement les deux periodes cote a cote.
-    refunded_prev = refund_totals_prev.get("30j") or 0
-    net_ca_prev = revenue_totals_prev.get("30j") or 0
-    if net_ca_prev:
-        refund_pct_prev = 100 * refunded_prev / net_ca_prev
-        refund_pct_prev_txt = f"{refund_pct_prev:.1f}%".replace(".", ",")
-        if refund_pct_prev <= 3:
-            refund_color_prev = "green"
-        elif refund_pct_prev <= 7:
-            refund_color_prev = "orange"
-        else:
-            refund_color_prev = "red"
-    else:
-        refund_pct_prev_txt = "—"
-        refund_color_prev = "purple"
-
-    refund_ratio_card_prev = f"""
-    <div class="card">
-      <div class="icon-box icon-purple">💸</div>
-      <div>
-        <div class="stat-label">Taux de remboursement (30j précédents)</div>
-        <div class="stat-row">
-          <div class="stat-value {refund_color_prev}">{refund_pct_prev_txt}</div>
-          <div class="divider"></div>
-          <div>
-            <div class="stat-sub">{fmt_eur(refunded_prev)}</div>
-            <div class="stat-sub-label">Remboursés / {fmt_eur(net_ca_prev)} CA</div>
-          </div>
-        </div>
-      </div>
-    </div>"""
-
-    # Tableau mensuel du taux de remboursement, annee en cours vs annee
-    # precedente (janvier a decembre), calcule via ShopifyQL (donc fiable
-    # sur tout l'historique, contrairement a l'ancienne version basee sur
-    # l'API Orders classique). Presente en 2 blocs de 6 mois cote a cote
-    # pour rester compact en hauteur sur l'ecran TV plutot qu'une liste
-    # verticale de 12 lignes.
-    MONTH_LABELS_FR = [
-        "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
-        "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
-    ]
-    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
-
-    def _month_pct(rate):
-        if rate is None:
-            return "—"
-        return f"{rate:.1f}%".replace(".", ",")
-
-    def _month_pill(rate):
-        if rate is None:
-            return '<span class="ratio-pill ratio-neutral">—</span>'
-        if rate <= 3:
-            color = "ratio-good"
-        elif rate <= 7:
-            color = "ratio-mid"
-        else:
-            color = "ratio-bad"
-        return f'<span class="ratio-pill {color}">{_month_pct(rate)}</span>'
-
-    def _month_row(entry):
-        label = MONTH_LABELS_FR[entry["month"] - 1]
-        return f"""
-        <tr>
-          <td>{label}</td>
-          <td class="month-prev">{_month_pct(entry["rate_prev"])}</td>
-          <td>{_month_pill(entry["rate_cur"])}</td>
-        </tr>"""
-
-    if len(monthly_refund_rates) == 12:
-        months_h1 = monthly_refund_rates[0:6]
-        months_h2 = monthly_refund_rates[6:12]
-
-        def _month_table(months):
-            rows = "".join(_month_row(e) for e in months)
-            return f"""
-        <table class="month-table">
-          <thead>
-            <tr><th>Mois</th><th>{current_year - 1}</th><th>{current_year}</th></tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>"""
-
-        monthly_refund_card = f"""
-    <div class="carriers-card">
-      <div class="carriers-title">Taux de remboursement par mois &mdash; {current_year} vs {current_year - 1}</div>
-      <div class="month-tables">
-        {_month_table(months_h1)}
-        {_month_table(months_h2)}
-      </div>
-    </div>"""
-    else:
-        monthly_refund_card = ""
+    # Remboursements retires completement de l'onglet SAV (donnees non
+    # fiables via l'API Orders classique, et ShopifyQL reste bloque pour
+    # cette app - cf. discussions precedentes). Les cartes/tableau ne sont
+    # plus generes.
+    refund_ratio_card = ""
+    refund_ratio_card_prev = ""
+    monthly_refund_card = ""
 
     # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
     # des commandes a traiter par boutique, dans le meme style que la liste
@@ -2451,13 +2286,8 @@ def render_html():
       {gmail_card}
       {gmail_24h_card}
     </div>
-    <div class="grid-bottom-2">
-      {refund_ratio_card}
-      {refund_ratio_card_prev}
-    </div>
     {gmail_labels_card}
     {gmail_24h_senders_card}
-    {monthly_refund_card}
   </div>
 
   <div id="tab-ads" class="tab-panel" hidden>
