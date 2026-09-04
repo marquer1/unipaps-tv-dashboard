@@ -127,6 +127,11 @@ GOOGLE_ADS_ACCOUNT_NAME_FILTER = os.environ.get("GOOGLE_ADS_ACCOUNT_NAME_FILTER"
 REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
 
+# Duree d'affichage de chaque onglet avant rotation automatique
+# (Commandes -> SAV -> Ads -> ...), en secondes. Reglable via la variable
+# d'environnement Render TAB_ROTATE_SECONDS sans toucher au code.
+TAB_ROTATE_SECONDS = int(os.environ.get("TAB_ROTATE_SECONDS", "10"))
+
 # A partir de EVENING_REFRESH_HOUR, rafraichissement plus espace pour
 # faciliter la lecture (moins de sautes d'affichage en fin de journee).
 EVENING_REFRESH_HOUR = int(os.environ.get("EVENING_REFRESH_HOUR", "16"))
@@ -2336,7 +2341,7 @@ def render_html():
 
   var _autoRotateTimer = null;
   var _tabOrder = ['commandes', 'sav', 'ads'];
-  var ROTATE_MS = 10000;
+  var ROTATE_MS = {TAB_ROTATE_SECONDS * 1000};
   // Un clic manuel sur un onglet met la rotation en pause pendant ce
   // delai, puis elle reprend toute seule. Avant, un clic manuel (meme
   // accidentel, ex: tele tactile) coupait la rotation automatique POUR
