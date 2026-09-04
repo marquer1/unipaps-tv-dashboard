@@ -1319,7 +1319,7 @@ def render_html():
         "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
         "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
     ]
-    current_year = now.year
+    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
 
     def _month_pct(rate):
         if rate is None:
