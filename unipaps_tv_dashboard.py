@@ -405,25 +405,85 @@ query($query: String!, $cursor: String) {
 }
 """
 
+# Requete dediee aux commandes annulees, filtree par DATE D'ANNULATION
+# (cancelled_at) et non par date de creation (created_at). Indispensable :
+# une commande peut avoir ete PASSEE il y a plusieurs mois puis ANNULEE
+# cette semaine - elle doit compter dans les "annulations" de cette
+# semaine (comme le fait le rapport Ventes natif de Shopify), pas dans
+# celles de sa semaine de creation (ou elle n'apparaitrait meme pas si la
+# fenetre de recherche est basee sur created_at).
+ORDERS_CANCELLED_QUERY = """
+query($query: String!, $cursor: String) {
+  orders(first: 250, after: $cursor, query: $query) {
+    edges {
+      cursor
+      node {
+        cancelledAt
+        totalPriceSet { shopMoney { amount } }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def get_cancelled_orders(token, start_date):
+    """Recupere les commandes ANNULEES entre start_date et maintenant, en
+    filtrant sur la date d'ANNULATION (cancelled_at) et non la date de
+    creation - une commande passee il y a longtemps peut etre annulee
+    aujourd'hui, elle doit alors compter comme une annulation d'aujourd'hui
+    (c'est ainsi que Shopify calcule sa ligne "Annulations de commande").
+    Renvoie une liste de dicts {cancelled_at: datetime, amount: float}
+    (amount = totalPriceSet, la valeur d'origine de la commande)."""
+    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    search_query = f"cancelled_at:>='{start_date.isoformat()}' status:cancelled"
+
+    orders = []
+    cursor = None
+    while True:
+        payload = {
+            "query": ORDERS_CANCELLED_QUERY,
+            "variables": {"query": search_query, "cursor": cursor},
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data:
+            raise RuntimeError(str(data["errors"]))
+        block = data["data"]["orders"]
+        for edge in block["edges"]:
+            node = edge["node"]
+            try:
+                cancelled_at = datetime.fromisoformat(node["cancelledAt"]).astimezone(ZoneInfo(TIMEZONE))
+            except (TypeError, ValueError):
+                continue
+            amount = float(node["totalPriceSet"]["shopMoney"]["amount"])
+            orders.append({"cancelled_at": cancelled_at, "amount": amount})
+        if block["pageInfo"]["hasNextPage"]:
+            cursor = block["pageInfo"]["endCursor"]
+        else:
+            break
+    return orders
+
 
 def get_shopify_orders_since(token, start_date):
     """Recupere toutes les commandes (hors annulees) depuis start_date,
     avec leur montant net et rembourse uniquement (pas de pays de
     livraison, requete allegee car le volume peut couvrir ~2 ans de
-    commandes). Sert au tableau mensuel des taux de remboursement.
-    Renvoie une liste de dicts {created_at: datetime, amount: float,
-    refunded: float}.
+    commandes). Sert au tableau mensuel des taux de remboursement (CA net,
+    bucket par mois de creation - la valeur annulee est calculee a part,
+    par get_cancelled_orders, sur la date d'annulation).
+    Renvoie une liste de dicts {created_at: datetime, amount: float}.
 
-    Important : contrairement a une premiere version de ce code, on
-    N'EXCLUT PLUS les commandes annulees (status:cancelled) de la requete.
-    Une annulation Shopify s'accompagne quasi-systematiquement d'un
-    remboursement (c'est d'ailleurs ce que Shopify affiche sous
-    "Annulations de commande" dans ses propres rapports Ventes) ; exclure
-    ces commandes revenait a ignorer entierement ce remboursement, ce qui
-    faisait sous-estimer tres largement le total rembourse affiche sur le
-    dashboard. currentTotalPriceSet integre deja les remboursements/
-    ajustements (il tombe a ~0 pour une commande annulee et remboursee en
-    totalite), donc le CA net n'est pas fausse par cet ajout."""
+    status:any (pas de filtre de statut par defaut) : currentTotalPriceSet
+    integre deja les remboursements/ajustements (il retombe a ~0 pour une
+    commande annulee et remboursee en totalite), donc inclure les
+    commandes annulees ici ne fausse pas le CA net."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
@@ -454,18 +514,7 @@ def get_shopify_orders_since(token, start_date):
             except (TypeError, ValueError):
                 continue
             amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
-            # "refunded" ici = valeur des commandes annulees (statut
-            # cancelled), qu'un remboursement ait ete emis ou non - c'est
-            # ce que Shopify affiche sous "Annulations de commande" dans
-            # son rapport Ventes natif. On utilise le total D'ORIGINE de
-            # la commande (totalPriceSet), pas le total courant (qui,
-            # pour une commande annulee, est deja retombe pres de 0).
-            refunded = (
-                float(node["totalPriceSet"]["shopMoney"]["amount"])
-                if node.get("cancelledAt")
-                else 0.0
-            )
-            orders.append({"created_at": created_at, "amount": amount, "refunded": refunded})
+            orders.append({"created_at": created_at, "amount": amount})
         if block["pageInfo"]["hasNextPage"]:
             cursor = block["pageInfo"]["endCursor"]
         else:
@@ -473,18 +522,26 @@ def get_shopify_orders_since(token, start_date):
     return orders
 
 
-def compute_monthly_refund_rates(orders, current_year):
+def compute_monthly_refund_rates(orders, cancelled_orders, current_year):
     """A partir d'une liste d'orders (get_shopify_orders_since, depuis le
-    1er janvier de l'annee precedente), calcule le taux de remboursement
-    (rembourse / CA brut) par mois, annee en cours vs annee precedente.
-    Renvoie une liste de 12 dicts (janvier a decembre, dans l'ordre) :
+    1er janvier de l'annee precedente) et d'une liste de commandes annulees
+    (get_cancelled_orders, meme fenetre mais filtree sur la date
+    d'ANNULATION), calcule le taux d'annulation (valeur annulee / CA brut)
+    par mois, annee en cours vs annee precedente. Le CA (net) est bucket
+    par mois de CREATION de la commande, les annulations par mois
+    d'ANNULATION - une commande creee en mai et annulee en juillet compte
+    donc dans le CA de mai et dans les annulations de juillet, comme le
+    fait Shopify. Renvoie une liste de 12 dicts (janvier a decembre) :
     {"month": int, "rate_cur": float|None, "rate_prev": float|None}."""
     buckets = {}
     for o in orders:
         key = (o["created_at"].year, o["created_at"].month)
         b = buckets.setdefault(key, {"net": 0.0, "refunded": 0.0})
         b["net"] += o["amount"]
-        b["refunded"] += o.get("refunded") or 0
+    for o in cancelled_orders:
+        key = (o["cancelled_at"].year, o["cancelled_at"].month)
+        b = buckets.setdefault(key, {"net": 0.0, "refunded": 0.0})
+        b["refunded"] += o["amount"]
 
     def _rate(bucket):
         if not bucket:
@@ -507,10 +564,12 @@ def compute_monthly_refund_rates(orders, current_year):
 
 
 def get_shopify_orders_last_30j(token):
-    """Recupere les commandes des 30 derniers jours (peu importe le statut,
-    hors annulees) avec leur montant TTC (deduit des remboursements), le
-    montant rembourse et le pays de livraison. Renvoie une liste de dicts
-    {created_at: datetime, country: str|None, amount: float, refunded: float}."""
+    """Recupere les commandes des 30 derniers jours (tous statuts, cf.
+    status:any) avec leur montant TTC (deduit des remboursements/
+    annulations via currentTotalPriceSet) et le pays de livraison. La
+    valeur annulee est calculee a part par get_cancelled_orders_last_30j,
+    sur la date d'annulation. Renvoie une liste de dicts
+    {created_at: datetime, country: str|None, amount: float}."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
@@ -546,22 +605,20 @@ def get_shopify_orders_last_30j(token):
             shipping = node.get("shippingAddress") or {}
             country = shipping.get("countryCodeV2")
             amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
-            # Cf. get_shopify_orders_since : "refunded" = valeur d'origine
-            # des commandes annulees (cancelledAt non nul), comme le calcule
-            # Shopify pour sa ligne "Annulations de commande".
-            refunded = (
-                float(node["totalPriceSet"]["shopMoney"]["amount"])
-                if node.get("cancelledAt")
-                else 0.0
-            )
-            orders.append(
-                {"created_at": created_at, "country": country, "amount": amount, "refunded": refunded}
-            )
+            orders.append({"created_at": created_at, "country": country, "amount": amount})
         if block["pageInfo"]["hasNextPage"]:
             cursor = block["pageInfo"]["endCursor"]
         else:
             break
     return orders
+
+
+def get_cancelled_orders_last_30j(token):
+    """Comme get_cancelled_orders, mais fenetre fixe des 30 derniers jours
+    (utilise cancelled_at, pas created_at - cf. get_cancelled_orders)."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    start = now - timedelta(days=30)
+    return get_cancelled_orders(token, start)
 
 
 def compute_revenue_by_country_group(orders):
@@ -632,29 +689,32 @@ def compute_revenue_totals(orders):
     }
 
 
-def compute_refund_totals(orders):
-    """Montant rembourse total, tous pays confondus, sur 30j/7j/veille -
-    meme decoupage que compute_revenue_totals (fenetres arretees a hier).
-    Renvoie {"30j": float, "7j": float, "veille": float}."""
+def compute_refund_totals(cancelled_orders):
+    """Valeur totale des commandes annulees ("Annulations de commande" au
+    sens Shopify), tous pays confondus, sur 30j/7j/veille - bucket par
+    date d'ANNULATION (cancelled_at), fenetres arretees a hier comme
+    compute_revenue_totals. Prend en entree la liste renvoyee par
+    get_cancelled_orders_last_30j. Renvoie
+    {"30j": float, "7j": float, "veille": float}."""
     now = datetime.now(ZoneInfo(TIMEZONE))
     yesterday_date = (now - timedelta(days=1)).date()
     since_30j_date = yesterday_date - timedelta(days=29)
     since_7j_date = yesterday_date - timedelta(days=6)
 
     total_30j = total_7j = total_veille = 0.0
-    for o in orders:
-        refunded = o.get("refunded") or 0
-        if not refunded:
+    for o in cancelled_orders:
+        amount = o.get("amount") or 0
+        if not amount:
             continue
-        order_date = o["created_at"].date()
+        order_date = o["cancelled_at"].date()
         if order_date > yesterday_date:
             continue
         if order_date >= since_30j_date:
-            total_30j += refunded
+            total_30j += amount
         if order_date >= since_7j_date:
-            total_7j += refunded
+            total_7j += amount
         if order_date == yesterday_date:
-            total_veille += refunded
+            total_veille += amount
     return {
         "30j": round(total_30j, 2),
         "7j": round(total_7j, 2),
@@ -1094,9 +1154,10 @@ def refresh_cache(startup=False):
         # pour Gmail, pour ne pas casser le reste du dashboard.
         try:
             orders_30j = get_shopify_orders_last_30j(token)
+            cancelled_30j = get_cancelled_orders_last_30j(token)
             revenue_by_country = compute_revenue_by_country_group(orders_30j)
             revenue_totals = compute_revenue_totals(orders_30j)
-            refund_totals = compute_refund_totals(orders_30j)
+            refund_totals = compute_refund_totals(cancelled_30j)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
             revenue_totals = {}
@@ -1123,7 +1184,10 @@ def refresh_cache(startup=False):
             try:
                 history_start = datetime(now.year - 1, 1, 1, tzinfo=ZoneInfo(TIMEZONE))
                 history_orders = get_shopify_orders_since(token, history_start)
-                monthly_refund_rates = compute_monthly_refund_rates(history_orders, now.year)
+                history_cancelled = get_cancelled_orders(token, history_start)
+                monthly_refund_rates = compute_monthly_refund_rates(
+                    history_orders, history_cancelled, now.year
+                )
                 monthly_refund_computed_date = today
                 oldest = min((o["created_at"] for o in history_orders), default=None)
                 print(
