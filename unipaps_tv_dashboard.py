@@ -1980,24 +1980,28 @@ def render_html():
     ads_summary_cards = f"""
     <div class="grid-ads">
       {_ca_card("CA total 30 jours", ca_total_30j, "💰")}
-      {_ratio_card("Ratio CA/Ads 30 jours", ca_total_30j, ads_total_30j)}
+      {_ratio_card("Ratio Ads/CA HT 30 jours", ca_total_30j, ads_total_30j)}
+    </div>"""
+
+    ads_summary_cards_below = f"""
+    <div class="grid-ads">
       {_ca_card("CA total 7 jours", ca_total_7j, "💰")}
-      {_ratio_card("Ratio CA/Ads 7 jours", ca_total_7j, ads_total_7j)}
-      {_ca_card("CA total veille", ca_total_veille, "💰")}
-      {_ratio_card("Ratio CA/Ads veille", ca_total_veille, ads_total_veille)}
+      {_ratio_card("Ratio Ads/CA HT 7 jours", ca_total_7j, ads_total_7j)}
+      {_ca_card("CA total hier", ca_total_veille, "💰")}
+      {_ratio_card("Ratio Ads/CA HT hier", ca_total_veille, ads_total_veille)}
     </div>"""
 
     ads_card = f"""
     <div class="carriers-card">
-      <div class="carriers-title">CA Shopify TTC &amp; dépenses Google Ads par pays</div>
+      <div class="carriers-title">CA TTC &amp; DÉPENSES GOOGLE ADS PAR PAYS</div>
       <div style="overflow-x:auto;">
       <table class="ads-table">
         <thead>
           <tr>
             <th>Pays</th>
             <th>CA 30j</th>
-            <th>Dépenses Ads</th>
-            <th>Ratio Ads/CA</th>
+            <th>Dépenses Google Ads</th>
+            <th>Ratio Ads/CA HT</th>
           </tr>
         </thead>
         <tbody>
@@ -2293,6 +2297,7 @@ def render_html():
   <div id="tab-ads" class="tab-panel" hidden>
     {ads_summary_cards}
     {ads_card}
+    {ads_summary_cards_below}
   </div>
 
   <div class="updated" id="updated-label">Dernière mise à jour : {updated_at} (rafraîchissement auto toutes les {refresh_seconds} sec)</div>
