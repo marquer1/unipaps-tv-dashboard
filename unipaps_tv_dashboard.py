@@ -301,6 +301,8 @@ _cache = {
     "revenue_by_country": {},
     "revenue_totals": {},
     "refund_totals": {},
+    "revenue_totals_prev": {},
+    "refund_totals_prev": {},
     "monthly_refund_rates": [],
     "monthly_refund_computed_date": None,
     "ads_spend_by_country": {},
@@ -932,6 +934,83 @@ def get_cancelled_orders_last_30j(token):
     return get_cancelled_orders(token, start)
 
 
+def get_shopify_orders_prev_30j(token):
+    """Commandes de la periode "30 jours precedents" (J-60 a J-30), pour la
+    carte de comparaison du taux de remboursement. On recupere simplement
+    les commandes depuis J-60 (comme get_shopify_orders_last_30j, meme
+    requete/format), puis on exclut celles de moins de 30 jours cote
+    code : pas besoin d'une requete GraphQL dediee, le volume sur 60 jours
+    reste raisonnable."""
+    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+    }
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    start = now - timedelta(days=60)
+    cutoff = now - timedelta(days=30)
+    search_query = f"created_at:>='{start.isoformat()}' status:any"
+
+    orders = []
+    cursor = None
+    while True:
+        payload = {
+            "query": ORDERS_REVENUE_QUERY,
+            "variables": {"query": search_query, "cursor": cursor},
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if "errors" in data:
+            raise RuntimeError(str(data["errors"]))
+        block = data["data"]["orders"]
+        for edge in block["edges"]:
+            node = edge["node"]
+            try:
+                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+            except (TypeError, ValueError):
+                continue
+            if created_at >= cutoff:
+                continue  # deja compte dans la fenetre "30 derniers jours"
+            amount = _order_total_sales(node)
+            orders.append({"created_at": created_at, "amount": amount})
+        if block["pageInfo"]["hasNextPage"]:
+            cursor = block["pageInfo"]["endCursor"]
+        else:
+            break
+    return orders
+
+
+def get_cancelled_orders_prev_30j(token):
+    """Annulations de la periode J-60 a J-30 (cf. get_shopify_orders_prev_30j)."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    start = now - timedelta(days=60)
+    cutoff = now - timedelta(days=30)
+    orders = get_cancelled_orders(token, start)
+    return [o for o in orders if o["cancelled_at"] < cutoff]
+
+
+def get_closed_returns_prev_30j(token):
+    """Retours clotures de la periode J-60 a J-30 (cf.
+    get_shopify_orders_prev_30j)."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    start = now - timedelta(days=60)
+    cutoff = now - timedelta(days=30)
+    refunds = get_closed_returns(token, start)
+    return [r for r in refunds if r["refunded_at"] < cutoff]
+
+
+def compute_simple_totals_prev_30j(orders, cancelled_orders, closed_returns):
+    """Version simplifiee de compute_revenue_totals / compute_refund_totals
+    pour une fenetre fixe deja bornee (J-60 a J-30) : pas de sous-fenetres
+    30j/7j/veille, juste un total CA et un total rembourse/annule sur toute
+    la periode. Renvoie (net_ca, refunded)."""
+    net_ca = sum(o["amount"] for o in orders)
+    refunded = sum(o.get("amount") or 0 for o in cancelled_orders)
+    refunded += sum(r.get("amount") or 0 for r in closed_returns)
+    return round(net_ca, 2), round(refunded, 2)
+
+
 def compute_revenue_by_country_group(orders):
     """A partir de la liste d'orders (get_shopify_orders_last_30j), calcule
     pour chaque groupe de pays (COUNTRY_GROUPS) le CA TTC sur 30 jours, sur
@@ -1488,6 +1567,23 @@ def refresh_cache(startup=False):
             refund_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
+        # Taux de remboursement des 30 jours PRECEDENTS (J-60 a J-30), pour
+        # la carte de comparaison dans l'onglet SAV. Isole dans son propre
+        # try/except, meme logique que le bloc ci-dessus.
+        try:
+            orders_prev_30j = get_shopify_orders_prev_30j(token)
+            cancelled_prev_30j = get_cancelled_orders_prev_30j(token)
+            closed_returns_prev_30j = get_closed_returns_prev_30j(token)
+            net_ca_prev, refunded_prev = compute_simple_totals_prev_30j(
+                orders_prev_30j, cancelled_prev_30j, closed_returns_prev_30j
+            )
+            revenue_totals_prev = {"30j": net_ca_prev}
+            refund_totals_prev = {"30j": refunded_prev}
+        except Exception as revenue_prev_exc:  # noqa: BLE001
+            revenue_totals_prev = {}
+            refund_totals_prev = {}
+            print(f"[CA/pays] Erreur lors du calcul du CA J-60/J-30 : {revenue_prev_exc}", flush=True)
+
         # Tableau mensuel du taux de remboursement retire (a nouveau) :
         # ShopifyQL est bloque (cf. ci-dessus) et l'API Orders classique
         # ne renvoie que les commandes recentes (~60 jours) sur cette
@@ -1528,6 +1624,8 @@ def refresh_cache(startup=False):
             _cache["revenue_by_country"] = revenue_by_country
             _cache["revenue_totals"] = revenue_totals
             _cache["refund_totals"] = refund_totals
+            _cache["revenue_totals_prev"] = revenue_totals_prev
+            _cache["refund_totals_prev"] = refund_totals_prev
             _cache["monthly_refund_rates"] = monthly_refund_rates
             _cache["monthly_refund_computed_date"] = monthly_refund_computed_date
             _cache["ads_spend_by_country"] = ads_spend_by_country
@@ -1593,6 +1691,8 @@ def render_html():
         revenue_by_country = dict(_cache["revenue_by_country"])
         revenue_totals = dict(_cache["revenue_totals"])
         refund_totals = dict(_cache["refund_totals"])
+        revenue_totals_prev = dict(_cache["revenue_totals_prev"])
+        refund_totals_prev = dict(_cache["refund_totals_prev"])
         monthly_refund_rates = list(_cache["monthly_refund_rates"])
         ads_spend_by_country = dict(_cache["ads_spend_by_country"])
         updated_at = _cache["updated_at"] or "..."
@@ -1734,6 +1834,39 @@ def render_html():
           <div>
             <div class="stat-sub">{fmt_eur(refunded_30j)}</div>
             <div class="stat-sub-label">Remboursés / {fmt_eur(net_ca_30j)} CA</div>
+          </div>
+        </div>
+      </div>
+    </div>"""
+
+    # Meme carte, mais pour les 30 jours PRECEDENTS (J-60 a J-30), pour
+    # comparer visuellement les deux periodes cote a cote.
+    refunded_prev = refund_totals_prev.get("30j") or 0
+    net_ca_prev = revenue_totals_prev.get("30j") or 0
+    if net_ca_prev:
+        refund_pct_prev = 100 * refunded_prev / net_ca_prev
+        refund_pct_prev_txt = f"{refund_pct_prev:.1f}%".replace(".", ",")
+        if refund_pct_prev <= 3:
+            refund_color_prev = "green"
+        elif refund_pct_prev <= 7:
+            refund_color_prev = "orange"
+        else:
+            refund_color_prev = "red"
+    else:
+        refund_pct_prev_txt = "—"
+        refund_color_prev = "purple"
+
+    refund_ratio_card_prev = f"""
+    <div class="card">
+      <div class="icon-box icon-purple">💸</div>
+      <div>
+        <div class="stat-label">Taux de remboursement (30j précédents)</div>
+        <div class="stat-row">
+          <div class="stat-value {refund_color_prev}">{refund_pct_prev_txt}</div>
+          <div class="divider"></div>
+          <div>
+            <div class="stat-sub">{fmt_eur(refunded_prev)}</div>
+            <div class="stat-sub-label">Remboursés / {fmt_eur(net_ca_prev)} CA</div>
           </div>
         </div>
       </div>
@@ -2279,10 +2412,13 @@ def render_html():
   </div>
 
   <div id="tab-sav" class="tab-panel" hidden>
-    <div class="grid-bottom-3">
+    <div class="grid-bottom-2">
       {gmail_card}
       {gmail_24h_card}
+    </div>
+    <div class="grid-bottom-2">
       {refund_ratio_card}
+      {refund_ratio_card_prev}
     </div>
     {gmail_labels_card}
     {gmail_24h_senders_card}
