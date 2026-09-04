@@ -1374,6 +1374,21 @@ def render_html():
 
     error_banner = f'<div class="error">Erreur de mise a jour : {error}</div>' if error else ""
 
+    # Onglet actif "au chargement" calcule cote serveur avec la meme regle
+    # que currentAutoTab() en JS (rotation par tranches de 10s sur
+    # l'horloge), pour pouvoir injecter directement le bon logo dans le
+    # HTML plutot que de compter sur le script pour le corriger apres
+    # coup. Sans ca, a chaque rechargement complet de la page (meta
+    # refresh), le navigateur affiche brievement le logo par defaut
+    # (Unipap's) avant que le JS ne le remplace par le logo A2C -> flash
+    # visible sur l'ecran TV. Ne couvre que le cas "rotation automatique"
+    # (le cas le plus frequent sur un ecran TV sans interaction) ; si un
+    # onglet a ete fixe manuellement via localStorage, le JS corrige
+    # toujours le logo au chargement comme avant.
+    _TAB_ORDER = ["commandes", "sav", "ads"]
+    _initial_tab = _TAB_ORDER[int(time.time() // 10) % len(_TAB_ORDER)]
+    initial_logo_b64 = LOGO_B64 if _initial_tab == "ads" else LOGO_A2C_B64
+
     return f"""<!doctype html>
 <html lang="fr">
 <head>
@@ -1505,7 +1520,7 @@ def render_html():
 <body>
 <div class="wrap">
   <div class="brand-header">
-    <img id="brand-logo-img" class="brand-logo" src="data:image/png;base64,{LOGO_B64}" alt="Unipap's">
+    <img id="brand-logo-img" class="brand-logo" src="data:image/png;base64,{initial_logo_b64}" alt="Unipap's">
   </div>
   {error_banner}
 
@@ -1584,6 +1599,12 @@ def render_html():
   var _autoRotateTimer = null;
   var _tabOrder = ['commandes', 'sav', 'ads'];
   var ROTATE_MS = 10000;
+  // Un clic manuel sur un onglet met la rotation en pause pendant ce
+  // delai, puis elle reprend toute seule. Avant, un clic manuel (meme
+  // accidentel, ex: tele tactile) coupait la rotation automatique POUR
+  // TOUJOURS (flag permanent en localStorage, jamais remis a zero) :
+  // l'ecran restait bloque sur un seul onglet indefiniment.
+  var MANUAL_PAUSE_MS = 3 * 60 * 1000;
   var LOGO_UNIPAPS = "data:image/png;base64,{LOGO_B64}";
   var LOGO_A2C = "data:image/png;base64,{LOGO_A2C_B64}";
   // Logo A2C Digital sur les 2 premiers onglets (Commandes, SAV), logo
@@ -1599,34 +1620,42 @@ def render_html():
     if (logoImg && LOGO_BY_TAB[name]) {{ logoImg.src = LOGO_BY_TAB[name]; }}
     try {{ localStorage.setItem('unipaps_active_tab', name); }} catch (e) {{}}
     if (manual) {{
-      if (_autoRotateTimer) {{ clearInterval(_autoRotateTimer); _autoRotateTimer = null; }}
-      try {{ localStorage.setItem('unipaps_auto_rotate_stopped', '1'); }} catch (e) {{}}
+      try {{ localStorage.setItem('unipaps_manual_until', String(Date.now() + MANUAL_PAUSE_MS)); }} catch (e) {{}}
     }}
   }}
 
   // Onglet "du moment" calcule a partir de l'heure reelle (et non d'un
   // minuteur qui redemarre a chaque rechargement de page) : ainsi la
-  // rotation continue meme si la page se recharge toutes les 2 secondes
-  // (rafraichissement auto du dashboard), bien avant les 10 secondes.
+  // rotation continue meme si la page se recharge (rafraichissement auto
+  // du dashboard), bien avant les 10 secondes.
   function currentAutoTab() {{
     var idx = Math.floor(Date.now() / ROTATE_MS) % _tabOrder.length;
     return _tabOrder[idx];
   }}
 
+  function manualPauseUntil() {{
+    var until = 0;
+    try {{ until = parseInt(localStorage.getItem('unipaps_manual_until') || '0', 10) || 0; }} catch (e) {{}}
+    return until;
+  }}
+
+  // Tourne en permanence, meme apres un clic manuel : tant qu'on est dans
+  // la fenetre de pause (MANUAL_PAUSE_MS), l'onglet choisi manuellement
+  // reste affiche ; une fois la fenetre passee, la rotation auto reprend
+  // d'elle-meme, sans qu'il faille recharger la page ou re-cliquer.
   function startAutoRotate() {{
     _autoRotateTimer = setInterval(function() {{
+      if (Date.now() < manualPauseUntil()) {{ return; }}
       showTab(currentAutoTab());
     }}, 1000);
   }}
 
   (function() {{
-    var stopped = false;
-    try {{ stopped = localStorage.getItem('unipaps_auto_rotate_stopped') === '1'; }} catch (e) {{}}
-
-    if (stopped) {{
+    if (Date.now() < manualPauseUntil()) {{
       var saved = 'commandes';
       try {{ saved = localStorage.getItem('unipaps_active_tab') || 'commandes'; }} catch (e) {{}}
       showTab(saved);
+      startAutoRotate();
     }} else {{
       showTab(currentAutoTab());
       startAutoRotate();
