@@ -1934,8 +1934,8 @@ def render_html():
         count_col = str(count_30j) if count_30j is not None else "—"
         return f"""
         <tr>
-          <td class="ads-count">{count_col}</td>
           <td><span class="country-name">{display_name}</span>{_pct_ca(entry.get("30j"))}</td>
+          <td class="ads-count">{count_col}</td>
           <td class="ca-cell">
             <div class="ca-bar-wrap">
               <div class="ca-bar" style="width:{bar_pct}%;"></div>
@@ -1976,8 +1976,8 @@ def render_html():
         if entry is None:
             ads_rows += f"""
         <tr>
-          <td class="ads-count">—</td>
           <td>{display_name}</td>
+          <td class="ads-count">—</td>
           <td colspan="3" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
@@ -2061,8 +2061,8 @@ def render_html():
       <table class="ads-table">
         <thead>
           <tr>
-            <th>Commandes</th>
             <th>Pays</th>
+            <th>Commandes</th>
             <th>CA TTC 30J</th>
             <th>Dépenses Google Ads</th>
             <th>Ratio Ads/CA HT</th>
