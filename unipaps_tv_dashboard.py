@@ -118,6 +118,12 @@ GOOGLE_ADS_LOGIN_CUSTOMER_ID = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", ""
 # Version de l'API Google Ads - a mettre a jour si Google la fait
 # expirer (erreur "API version no longer supported" dans les logs).
 GOOGLE_ADS_API_VERSION = os.environ.get("GOOGLE_ADS_API_VERSION", "v24")
+# Ce dashboard ne doit refleter que le compte Google Ads d'Unipap's, pas
+# les autres comptes clients rattaches au meme compte Manager (Wood&Chic,
+# Clemanto, etc.). Filtre applique sur le nom descriptif du compte client
+# (insensible a la casse) ; ajustable ici sans toucher au code si le nom
+# du compte change un jour.
+GOOGLE_ADS_ACCOUNT_NAME_FILTER = os.environ.get("GOOGLE_ADS_ACCOUNT_NAME_FILTER", "unipap").lower()
 REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
 
@@ -535,15 +541,20 @@ def _google_ads_search(access_token, customer_id, query):
 
 
 def get_google_ads_child_accounts(access_token):
-    """Liste des ID de comptes clients (non-manager) rattaches au compte
-    Manager GOOGLE_ADS_LOGIN_CUSTOMER_ID. Renvoie une liste de str."""
+    """Liste des comptes clients (non-manager) rattaches au compte Manager
+    GOOGLE_ADS_LOGIN_CUSTOMER_ID. Renvoie une liste de tuples
+    (id: str, descriptive_name: str)."""
     query = (
-        "SELECT customer_client.id, customer_client.manager, customer_client.status "
+        "SELECT customer_client.id, customer_client.descriptive_name, "
+        "customer_client.manager, customer_client.status "
         "FROM customer_client "
         "WHERE customer_client.manager = FALSE AND customer_client.status = 'ENABLED'"
     )
     rows = _google_ads_search(access_token, GOOGLE_ADS_LOGIN_CUSTOMER_ID, query)
-    return [str(r["customerClient"]["id"]) for r in rows]
+    return [
+        (str(r["customerClient"]["id"]), r["customerClient"].get("descriptiveName", ""))
+        for r in rows
+    ]
 
 
 def get_google_ads_campaign_costs_last_30j(access_token, customer_id):
@@ -910,7 +921,9 @@ def refresh_cache():
                 ads_spend_by_country = {}
             else:
                 ads_rows = []
-                for child_id in get_google_ads_child_accounts(ads_token):
+                for child_id, child_name in get_google_ads_child_accounts(ads_token):
+                    if GOOGLE_ADS_ACCOUNT_NAME_FILTER not in (child_name or "").lower():
+                        continue
                     ads_rows.extend(get_google_ads_campaign_costs_last_30j(ads_token, child_id))
                 ads_spend_by_country = compute_ads_spend_by_country_group(ads_rows)
         except Exception as ads_exc:  # noqa: BLE001
@@ -1153,26 +1166,54 @@ def render_html():
 
     ads_api_live = bool(ads_spend_by_country)
 
+    # Taux de TVA utilise pour convertir le CA Shopify (TTC) en CA HT avant
+    # de calculer le ratio depenses Ads / CA. Applique uniformement a tous
+    # les pays (pas de taux specifique par pays).
+    VAT_RATE = 1.20
+
     def _ratio_txt(ca_value, ads_value):
-        if not ads_value:
+        if not ca_value or not ads_value:
             return "—"
-        return f"{ca_value / ads_value:.1f}"
+        ca_ht = ca_value / VAT_RATE
+        if not ca_ht:
+            return "—"
+        return f"{100 * ads_value / ca_ht:.1f}%".replace(".", ",")
+
+    def _ratio_pill(ca_value, ads_value):
+        """Pastille coloree pour le ratio depenses Ads / CA HT : vert = tres
+        rentable, orange = correct, rouge = a surveiller."""
+        txt = _ratio_txt(ca_value, ads_value)
+        if txt == "—" or not ca_value:
+            return f'<span class="ratio-pill ratio-neutral">{txt}</span>'
+        pct = 100 * ads_value / (ca_value / VAT_RATE)
+        if pct <= 30:
+            color = "ratio-good"
+        elif pct <= 50:
+            color = "ratio-mid"
+        else:
+            color = "ratio-bad"
+        return f'<span class="ratio-pill {color}">{txt}</span>'
 
     def _ads_row(display_name, entry, ads_entry):
         if ads_api_live:
             ads_spend_col = fmt_eur(ads_entry.get("30j") if ads_entry else 0)
-            ratio_col = _ratio_txt(entry.get("30j") or 0, (ads_entry or {}).get("30j") or 0)
+            ratio_col = _ratio_pill(entry.get("30j") or 0, (ads_entry or {}).get("30j") or 0)
             ads_class = ""
         else:
             ads_spend_col = "En attente API Ads"
-            ratio_col = "—"
+            ratio_col = '<span class="ratio-pill ratio-neutral">—</span>'
             ads_class = ' class="ads-indispo"'
+        ca_30j = entry.get("30j") or 0
+        bar_pct = round(100 * ca_30j / ca_total_30j, 1) if ca_total_30j else 0
         return f"""
         <tr>
-          <td>{display_name}{_pct_ca(entry.get("30j"))}</td>
-          <td>{fmt_eur(entry.get("30j"))}</td>
-          <td>{fmt_eur(entry.get("7j"))}</td>
-          <td>{fmt_eur(entry.get("veille"))}</td>
+          <td><span class="country-name">{display_name}</span>{_pct_ca(entry.get("30j"))}</td>
+          <td class="ca-cell">
+            <div class="ca-bar-wrap">
+              <div class="ca-bar" style="width:{bar_pct}%;"></div>
+              <span class="ca-bar-value">{fmt_eur(entry.get("30j"))}</span>
+            </div>
+          </td>
           <td{ads_class}>{ads_spend_col}</td>
           <td{ads_class}>{ratio_col}</td>
         </tr>"""
@@ -1194,7 +1235,7 @@ def render_html():
             ads_rows += f"""
         <tr>
           <td>{display_name}</td>
-          <td colspan="5" class="ads-indispo">Indisponible</td>
+          <td colspan="3" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
         if label != "FR" and entry.get("30j", 0) < ADS_MIN_CA_30J:
@@ -1262,10 +1303,8 @@ def render_html():
           <tr>
             <th>Pays</th>
             <th>CA 30j</th>
-            <th>CA 7j</th>
-            <th>CA veille</th>
             <th>Dépenses Ads</th>
-            <th>Ratio CA/Ads</th>
+            <th>Ratio Ads/CA</th>
           </tr>
         </thead>
         <tbody>
@@ -1376,12 +1415,36 @@ def render_html():
   }}
   .tab-btn-active {{ background: linear-gradient(90deg, #f6c877, #eba54b); color: #ffffff; border-color: #eba54b; }}
 
-  .ads-table {{ width: 100%; border-collapse: collapse; font-size: 15px; min-width: 640px; }}
-  .ads-table th {{ text-align: left; font-size: 12px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 8px 10px; border-bottom: 2px solid #e5e9f0; }}
-  .ads-table td {{ padding: 8px 10px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
+  .ads-table {{ width: 100%; border-collapse: collapse; font-size: 17px; min-width: 640px; }}
+  .ads-table th {{ text-align: left; font-size: 13px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 12px 16px; border-bottom: 2px solid #e5e9f0; }}
+  .ads-table td {{ padding: 14px 16px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
   .ads-table tr:last-child td {{ border-bottom: none; }}
+  .ads-table tbody tr:nth-child(even) {{ background: #f7f9fd; }}
+  .ads-table tbody tr:hover {{ background: #eef4ff; }}
+  .country-name {{ font-size: 17px; font-weight: 700; color: #1f2733; }}
   .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
   .ads-pct {{ color: #8b95a5; font-weight: 500; font-size: 13px; }}
+  .ca-cell {{ min-width: 220px; }}
+  .ca-bar-wrap {{
+    position: relative; height: 30px; border-radius: 8px;
+    background: #eef1f7; overflow: hidden; display: flex; align-items: center;
+  }}
+  .ca-bar {{
+    position: absolute; left: 0; top: 0; bottom: 0;
+    background: linear-gradient(90deg, #bfe6cd, #6fcf97);
+    border-radius: 8px;
+  }}
+  .ca-bar-value {{
+    position: relative; z-index: 1; padding: 0 10px; color: #1c5c33; font-weight: 700;
+  }}
+  .ratio-pill {{
+    display: inline-block; padding: 5px 12px; border-radius: 999px;
+    font-weight: 800; font-size: 15px;
+  }}
+  .ratio-good {{ background: #e3f6ea; color: #1c8a4b; }}
+  .ratio-mid {{ background: #fdf1dc; color: #b3701a; }}
+  .ratio-bad {{ background: #fde4e4; color: #c23434; }}
+  .ratio-neutral {{ background: #eef1f7; color: #8b95a5; }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
