@@ -1970,10 +1970,10 @@ def render_html():
         size = "18px" if not ads_api_live else "22px"
         return f"""
     <div class="card">
-      <div class="icon-box icon-blue">📊</div>
+      <div class="icon-box icon-orange">📊</div>
       <div>
         <div class="stat-label">{label}</div>
-        <div class="stat-value blue" style="font-size:{size};">{value_txt}</div>
+        <div class="stat-value orange" style="font-size:{size};">{value_txt}</div>
       </div>
     </div>"""
 
