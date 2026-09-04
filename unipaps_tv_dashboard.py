@@ -1151,6 +1151,9 @@ def format_date_fr(d):
 def render_html():
     today_label = format_date_fr(datetime.now(ZoneInfo(TIMEZONE)))
     refresh_seconds = current_refresh_seconds()
+
+    def fmt_eur(value):
+        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
     with _cache_lock:
         a_traiter = _cache["a_traiter"]
         a_traiter_by_store = dict(_cache["a_traiter_by_store"])
@@ -1409,9 +1412,6 @@ def render_html():
       <div class="carriers-title">Mails non lus par boîte <span>(toute la boîte de réception)</span></div>
       {gmail_label_rows}
     </div>"""
-
-    def fmt_eur(value):
-        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
 
     ADS_MIN_CA_30J = 500.0
 
