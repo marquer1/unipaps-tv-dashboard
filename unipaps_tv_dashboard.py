@@ -1261,49 +1261,13 @@ def refresh_cache(startup=False):
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
         # Taux de remboursement mensuel (annee en cours vs annee
-        # precedente) : porte sur ~2 ans de commandes, donc beaucoup plus
-        # lourd que le CA 30j. Recalcule une seule fois par jour (pas a
-        # chaque cycle de refresh_cache, qui tourne toutes les
-        # REFRESH_MINUTES) pour ne pas multiplier inutilement les appels
-        # a l'API Shopify sur un gros volume de commandes. Jamais calcule
-        # au demarrage (startup=True, appele une seule fois de maniere
-        # synchrone par main() avant que le serveur HTTP n'ecoute) : sur
-        # une grosse boutique, aller chercher ~2 ans de commandes pourrait
-        # retarder l'ouverture du port et faire echouer le healthcheck /
-        # timeout de deploiement sur Render. Le premier cycle en tache de
-        # fond (background_refresher) s'en charge quelques minutes plus
-        # tard, sans bloquer personne.
+        # precedente) retire : l'API Shopify de cette boutique ne renvoie
+        # que les commandes recentes (~60 jours), rendant l'historique 2
+        # ans peu fiable (mois manquants). On ne calcule plus cet
+        # historique du tout (economise des appels API inutiles) ; seul le
+        # taux sur 30 jours reste affiche, calcule plus haut.
+        monthly_refund_rates = []
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-        if startup or monthly_refund_computed_date == today:
-            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-        else:
-            try:
-                history_start = datetime(now.year - 1, 1, 1, tzinfo=ZoneInfo(TIMEZONE))
-                history_orders = get_shopify_orders_since(token, history_start)
-                history_cancelled = get_cancelled_orders(token, history_start)
-                history_closed_returns = get_closed_returns(token, history_start)
-                monthly_refund_rates = compute_monthly_refund_rates(
-                    history_orders, history_cancelled, history_closed_returns, now.year
-                )
-                monthly_refund_computed_date = today
-                oldest = min((o["created_at"] for o in history_orders), default=None)
-                print(
-                    f"[Remboursements/mois] {len(history_orders)} commandes recuperees, "
-                    f"demande depuis {history_start.date()}, la plus ancienne recue date du "
-                    f"{oldest.date() if oldest else 'N/A'} (si cette date est ~60 jours avant "
-                    "aujourd'hui alors que history_start demande ~2 ans, c'est que l'app Shopify "
-                    "n'a acces qu'aux commandes recentes : il faut activer l'acces 'commandes "
-                    "historiques' / 'read_all_orders' - Protected customer data - dans les "
-                    "parametres de l'app sur le Partner Dashboard).",
-                    flush=True,
-                )
-            except Exception as history_exc:  # noqa: BLE001
-                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-                monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-                print(
-                    f"[Remboursements/mois] Erreur lors du calcul de l'historique : {history_exc}",
-                    flush=True,
-                )
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
@@ -1545,65 +1509,12 @@ def render_html():
       </div>
     </div>"""
 
-    # Tableau mensuel du taux de remboursement, annee en cours vs annee
-    # precedente (janvier a decembre). Presente en 2 blocs de 6 mois cote
-    # a cote pour rester compact en hauteur sur l'ecran TV plutot qu'une
-    # liste verticale de 12 lignes.
-    MONTH_LABELS_FR = [
-        "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
-        "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
-    ]
-    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
-
-    def _month_pct(rate):
-        if rate is None:
-            return "—"
-        return f"{rate:.1f}%".replace(".", ",")
-
-    def _month_pill(rate):
-        if rate is None:
-            return '<span class="ratio-pill ratio-neutral">—</span>'
-        if rate <= 3:
-            color = "ratio-good"
-        elif rate <= 7:
-            color = "ratio-mid"
-        else:
-            color = "ratio-bad"
-        return f'<span class="ratio-pill {color}">{_month_pct(rate)}</span>'
-
-    def _month_row(entry):
-        label = MONTH_LABELS_FR[entry["month"] - 1]
-        return f"""
-        <tr>
-          <td>{label}</td>
-          <td class="month-prev">{_month_pct(entry["rate_prev"])}</td>
-          <td>{_month_pill(entry["rate_cur"])}</td>
-        </tr>"""
-
-    if len(monthly_refund_rates) == 12:
-        months_h1 = monthly_refund_rates[0:6]
-        months_h2 = monthly_refund_rates[6:12]
-
-        def _month_table(months):
-            rows = "".join(_month_row(e) for e in months)
-            return f"""
-        <table class="month-table">
-          <thead>
-            <tr><th>Mois</th><th>{current_year - 1}</th><th>{current_year}</th></tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>"""
-
-        monthly_refund_card = f"""
-    <div class="carriers-card">
-      <div class="carriers-title">Taux de remboursement par mois &mdash; {current_year} vs {current_year - 1}</div>
-      <div class="month-tables">
-        {_month_table(months_h1)}
-        {_month_table(months_h2)}
-      </div>
-    </div>"""
-    else:
-        monthly_refund_card = ""
+    # Tableau mensuel du taux de remboursement retire : l'API Shopify de
+    # cette boutique ne renvoie que les commandes recentes (~60 jours),
+    # donc l'historique 2 ans necessaire (annee en cours vs precedente)
+    # n'est pas fiable. On garde uniquement le taux sur 30 jours (carte
+    # refund_ratio_card ci-dessus).
+    monthly_refund_card = ""
 
     # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
     # des commandes a traiter par boutique, dans le meme style que la liste
