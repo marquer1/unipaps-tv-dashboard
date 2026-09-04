@@ -519,7 +519,7 @@ def _google_ads_search(access_token, customer_id, query):
     results = []
     page_token = None
     while True:
-        payload = {"query": query, "pageSize": 10000}
+        payload = {"query": query}
         if page_token:
             payload["pageToken"] = page_token
         resp = requests.post(url, headers=headers, json=payload, timeout=30)
