@@ -1459,43 +1459,38 @@ def refresh_cache(startup=False):
             print(f"[Gmail] Erreur lors de la recuperation des libelles : {gmail_exc}", flush=True)
 
         # CA Shopify par pays : isole dans son propre try/except, comme
-        # pour Gmail, pour ne pas casser le reste du dashboard. Utilise
-        # ShopifyQL (shopifyqlQuery, scope read_reports) plutot qu'une
-        # reconstruction manuelle a partir des champs de commande - cf.
-        # get_sales_summary_ql / get_sales_by_country_ql : ce sont
-        # EXACTEMENT les memes chiffres que Shopify Analytics (Ventes
-        # totales, Annulations de ventes...), verifie face a face avec le
-        # rapport natif Shopify.
+        # pour Gmail, pour ne pas casser le reste du dashboard.
+        #
+        # ShopifyQL (shopifyqlQuery) abandonne : necessite le scope
+        # read_reports ET l'approbation "Protected customer data access"
+        # niveau 2, qui n'est pas accessible pour une app creee via le
+        # nouveau Dev Dashboard (bug Shopify connu, confirme sur cette
+        # app - n'apparait pas dans le Partner Dashboard pour faire la
+        # demande). Retour a la reconstruction manuelle via l'API Orders
+        # classique (moins precise que Shopify Analytics sur les
+        # annulations/retours, mais fonctionnelle sans permission
+        # bloquante).
         try:
-            revenue_totals, refund_totals = get_sales_summary_ql(token)
-            revenue_by_country = get_sales_by_country_ql(token)
+            orders_30j = get_shopify_orders_last_30j(token)
+            cancelled_30j = get_cancelled_orders_last_30j(token)
+            closed_returns_30j = get_closed_returns_last_30j(token)
+            revenue_by_country = compute_revenue_by_country_group(orders_30j)
+            revenue_totals = compute_revenue_totals(orders_30j)
+            refund_totals = compute_refund_totals(cancelled_30j, closed_returns_30j)
         except Exception as revenue_exc:  # noqa: BLE001
             revenue_by_country = {}
             revenue_totals = {}
             refund_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
-        # Taux de remboursement mensuel (annee en cours vs annee
-        # precedente) : de retour, via ShopifyQL (get_monthly_refund_rates_ql)
-        # qui donne acces a l'historique complet (pas la limite ~60 jours
-        # de l'API Orders classique). Recalcule une seule fois par jour
-        # (pas a chaque cycle de refresh_cache) pour rester leger ; jamais
-        # au demarrage (startup=True) pour ne pas retarder le healthcheck
-        # Render.
+        # Tableau mensuel du taux de remboursement retire (a nouveau) :
+        # ShopifyQL est bloque (cf. ci-dessus) et l'API Orders classique
+        # ne renvoie que les commandes recentes (~60 jours) sur cette
+        # boutique, donc l'historique 2 ans (2025 inclus) n'est pas
+        # fiable. Seul le taux 30 jours reste affiche (carte
+        # refund_ratio_card, calculee plus haut).
+        monthly_refund_rates = []
         monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-        if startup or monthly_refund_computed_date == today:
-            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-        else:
-            try:
-                monthly_refund_rates = get_monthly_refund_rates_ql(token, now.year)
-                monthly_refund_computed_date = today
-            except Exception as monthly_exc:  # noqa: BLE001
-                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-                monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-                print(
-                    f"[Remboursements/mois] Erreur ShopifyQL : {monthly_exc}",
-                    flush=True,
-                )
 
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
