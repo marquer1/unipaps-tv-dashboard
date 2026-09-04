@@ -108,6 +108,16 @@ for _i in (2, 3, 4):
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
+
+# Google Ads (depenses par pays, onglet Ads). Reutilise le meme
+# GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET que Gmail (meme projet Google
+# Cloud), avec un refresh token distinct (scope adwords).
+GOOGLE_ADS_REFRESH_TOKEN = os.environ.get("GOOGLE_ADS_REFRESH_TOKEN", "")
+GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "")
+GOOGLE_ADS_LOGIN_CUSTOMER_ID = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").replace("-", "").strip()
+# Version de l'API Google Ads - a mettre a jour si Google la fait
+# expirer (erreur "API version no longer supported" dans les logs).
+GOOGLE_ADS_API_VERSION = os.environ.get("GOOGLE_ADS_API_VERSION", "v19")
 REFRESH_MINUTES = float(os.environ.get("REFRESH_MINUTES", "15"))
 REFRESH_SECONDS = int(os.environ.get("REFRESH_SECONDS", str(int(REFRESH_MINUTES * 60))))
 
@@ -279,6 +289,7 @@ _cache = {
     "gmail_label_counts": {},
     "revenue_by_country": {},
     "revenue_totals": {},
+    "ads_spend_by_country": {},
     "a_traiter_by_store": {},
     "updated_at": None,
     "error": None,
@@ -459,6 +470,147 @@ def compute_revenue_totals(orders):
         "7j": round(total_7j, 2),
         "veille": round(total_veille, 2),
     }
+
+
+def get_google_ads_access_token():
+    """Comme get_gmail_access_token, mais pour le refresh token Google Ads
+    (meme projet/app Google Cloud, scope different)."""
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_ADS_REFRESH_TOKEN and GOOGLE_ADS_DEVELOPER_TOKEN):
+        print(
+            "[Google Ads] Variables manquantes : "
+            f"GOOGLE_CLIENT_ID={'ok' if GOOGLE_CLIENT_ID else 'MANQUANT'}, "
+            f"GOOGLE_CLIENT_SECRET={'ok' if GOOGLE_CLIENT_SECRET else 'MANQUANT'}, "
+            f"GOOGLE_ADS_REFRESH_TOKEN={'ok' if GOOGLE_ADS_REFRESH_TOKEN else 'MANQUANT'}, "
+            f"GOOGLE_ADS_DEVELOPER_TOKEN={'ok' if GOOGLE_ADS_DEVELOPER_TOKEN else 'MANQUANT'}",
+            flush=True,
+        )
+        return None
+    token_resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": GOOGLE_CLIENT_ID.strip(),
+            "client_secret": GOOGLE_CLIENT_SECRET.strip(),
+            "refresh_token": GOOGLE_ADS_REFRESH_TOKEN.strip(),
+            "grant_type": "refresh_token",
+        },
+        timeout=20,
+    )
+    if not token_resp.ok:
+        print(f"[Google Ads] Reponse Google (token) : {token_resp.status_code} {token_resp.text}", flush=True)
+    token_resp.raise_for_status()
+    return token_resp.json()["access_token"]
+
+
+def _google_ads_search(access_token, customer_id, query):
+    """Execute une requete GAQL via l'API REST Google Ads et renvoie la
+    liste des lignes ("results"), toutes pages confondues."""
+    url = (
+        f"https://googleads.googleapis.com/{GOOGLE_ADS_API_VERSION}"
+        f"/customers/{customer_id}/googleAds:search"
+    )
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "developer-token": GOOGLE_ADS_DEVELOPER_TOKEN.strip(),
+        "Content-Type": "application/json",
+    }
+    if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+        headers["login-customer-id"] = GOOGLE_ADS_LOGIN_CUSTOMER_ID
+
+    results = []
+    page_token = None
+    while True:
+        payload = {"query": query, "pageSize": 10000}
+        if page_token:
+            payload["pageToken"] = page_token
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        if not resp.ok:
+            print(f"[Google Ads] Erreur requete ({customer_id}) : {resp.status_code} {resp.text}", flush=True)
+        resp.raise_for_status()
+        data = resp.json()
+        results.extend(data.get("results", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            break
+    return results
+
+
+def get_google_ads_child_accounts(access_token):
+    """Liste des ID de comptes clients (non-manager) rattaches au compte
+    Manager GOOGLE_ADS_LOGIN_CUSTOMER_ID. Renvoie une liste de str."""
+    query = (
+        "SELECT customer_client.id, customer_client.manager, customer_client.status "
+        "FROM customer_client "
+        "WHERE customer_client.manager = FALSE AND customer_client.status = 'ENABLED'"
+    )
+    rows = _google_ads_search(access_token, GOOGLE_ADS_LOGIN_CUSTOMER_ID, query)
+    return [str(r["customerClient"]["id"]) for r in rows]
+
+
+def get_google_ads_campaign_costs_last_30j(access_token, customer_id):
+    """Cout (en euros) par campagne et par jour, sur les 30 derniers jours,
+    pour un compte client donne. Renvoie une liste de dicts
+    {date: 'YYYY-MM-DD', campaign_name: str, cost: float}."""
+    query = (
+        "SELECT campaign.name, segments.date, metrics.cost_micros "
+        "FROM campaign "
+        "WHERE segments.date DURING LAST_30_DAYS"
+    )
+    rows = _google_ads_search(access_token, customer_id, query)
+    out = []
+    for r in rows:
+        cost_micros = int(r.get("metrics", {}).get("costMicros", 0) or 0)
+        if cost_micros == 0:
+            continue
+        out.append(
+            {
+                "date": r["segments"]["date"],
+                "campaign_name": r["campaign"].get("name", ""),
+                "cost": cost_micros / 1_000_000,
+            }
+        )
+    return out
+
+
+def compute_ads_spend_by_country_group(ads_rows):
+    """A partir des lignes de cout (get_google_ads_campaign_costs_last_30j,
+    toutes boutiques/comptes confondus), regroupe la depense par indicatif
+    pays (debut du titre de campagne, ex: "FR ..." -> "FR") sur 30j/7j/
+    veille, comme compute_revenue_by_country_group cote Shopify. Renvoie
+    {indicatif: {"30j":..,"7j":..,"veille":..}} + calcule aussi le total
+    toutes campagnes (y compris celles sans indicatif reconnu) sous la cle
+    "TOTAL"."""
+    now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = (now - timedelta(days=7)).date()
+    yesterday_date = (now - timedelta(days=1)).date()
+
+    totals = {}
+    grand_total = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
+    for row in ads_rows:
+        name = (row.get("campaign_name") or "").strip()
+        prefix = name.split()[0].upper() if name else ""
+        label = prefix if prefix in COUNTRY_GROUPS else "AUTRES"
+        try:
+            row_date = datetime.strptime(row["date"], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            continue
+        cost = row["cost"]
+        entry = totals.setdefault(label, {"30j": 0.0, "7j": 0.0, "veille": 0.0})
+        entry["30j"] += cost
+        grand_total["30j"] += cost
+        if row_date >= since_7j:
+            entry["7j"] += cost
+            grand_total["7j"] += cost
+        if row_date == yesterday_date:
+            entry["veille"] += cost
+            grand_total["veille"] += cost
+
+    for entry in totals.values():
+        for k in entry:
+            entry[k] = round(entry[k], 2)
+    for k in grand_total:
+        grand_total[k] = round(grand_total[k], 2)
+    totals["TOTAL"] = grand_total
+    return totals
 
 
 def get_gmail_access_token():
@@ -749,6 +901,22 @@ def refresh_cache():
             revenue_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
+        # Depenses Google Ads par pays : idem, isole dans son propre
+        # try/except. Reste vide (donc "En attente API Ads" cote affichage)
+        # tant que le Basic access Google Ads n'est pas valide.
+        try:
+            ads_token = get_google_ads_access_token()
+            if ads_token is None or not GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+                ads_spend_by_country = {}
+            else:
+                ads_rows = []
+                for child_id in get_google_ads_child_accounts(ads_token):
+                    ads_rows.extend(get_google_ads_campaign_costs_last_30j(ads_token, child_id))
+                ads_spend_by_country = compute_ads_spend_by_country_group(ads_rows)
+        except Exception as ads_exc:  # noqa: BLE001
+            ads_spend_by_country = {}
+            print(f"[Google Ads] Erreur lors du calcul des depenses : {ads_exc}", flush=True)
+
         with _cache_lock:
             _cache["a_traiter"] = a_traiter
             _cache["a_traiter_by_store"] = a_traiter_by_store
@@ -761,6 +929,7 @@ def refresh_cache():
             _cache["gmail_label_counts"] = gmail_label_counts
             _cache["revenue_by_country"] = revenue_by_country
             _cache["revenue_totals"] = revenue_totals
+            _cache["ads_spend_by_country"] = ads_spend_by_country
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
     except Exception as exc:  # noqa: BLE001
@@ -819,6 +988,7 @@ def render_html():
         gmail_label_counts = dict(_cache["gmail_label_counts"])
         revenue_by_country = dict(_cache["revenue_by_country"])
         revenue_totals = dict(_cache["revenue_totals"])
+        ads_spend_by_country = dict(_cache["ads_spend_by_country"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
 
@@ -981,19 +1151,35 @@ def render_html():
             return ""
         return f' <span class="ads-pct">- {100 * value / ca_total_30j:.1f}%</span>'
 
-    def _ads_row(display_name, entry):
+    ads_api_live = bool(ads_spend_by_country)
+
+    def _ratio_txt(ca_value, ads_value):
+        if not ads_value:
+            return "—"
+        return f"{ca_value / ads_value:.1f}"
+
+    def _ads_row(display_name, entry, ads_entry):
+        if ads_api_live:
+            ads_spend_col = fmt_eur(ads_entry.get("30j") if ads_entry else 0)
+            ratio_col = _ratio_txt(entry.get("30j") or 0, (ads_entry or {}).get("30j") or 0)
+            ads_class = ""
+        else:
+            ads_spend_col = "En attente API Ads"
+            ratio_col = "—"
+            ads_class = ' class="ads-indispo"'
         return f"""
         <tr>
           <td>{display_name}{_pct_ca(entry.get("30j"))}</td>
           <td>{fmt_eur(entry.get("30j"))}</td>
           <td>{fmt_eur(entry.get("7j"))}</td>
           <td>{fmt_eur(entry.get("veille"))}</td>
-          <td class="ads-indispo">En attente API Ads</td>
-          <td class="ads-indispo">—</td>
+          <td{ads_class}>{ads_spend_col}</td>
+          <td{ads_class}>{ratio_col}</td>
         </tr>"""
 
     ads_rows = ""
     others_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
+    others_ads_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
     has_others = False
     sorted_labels = sorted(
         COUNTRY_GROUPS,
@@ -1003,22 +1189,29 @@ def render_html():
     for label in sorted_labels:
         display_name = COUNTRY_DISPLAY_NAMES.get(label, label)
         entry = revenue_by_country.get(label)
+        ads_entry = ads_spend_by_country.get(label)
         if entry is None:
             ads_rows += f"""
         <tr>
           <td>{display_name}</td>
-          <td colspan="4" class="ads-indispo">Indisponible</td>
+          <td colspan="5" class="ads-indispo">Indisponible</td>
         </tr>"""
             continue
         if label != "FR" and entry.get("30j", 0) < ADS_MIN_CA_30J:
             has_others = True
             for key in others_totals:
                 others_totals[key] += entry.get(key) or 0
+            for key in others_ads_totals:
+                others_ads_totals[key] += (ads_entry or {}).get(key) or 0
             continue
-        ads_rows += _ads_row(display_name, entry)
+        ads_rows += _ads_row(display_name, entry, ads_entry)
 
     if has_others:
-        ads_rows += _ads_row("🌍 Autres pays", {k: round(v, 2) for k, v in others_totals.items()})
+        ads_rows += _ads_row(
+            "🌍 Autres pays",
+            {k: round(v, 2) for k, v in others_totals.items()},
+            {k: round(v, 2) for k, v in others_ads_totals.items()},
+        )
 
     def _ca_card(label, value, icon):
         return f"""
@@ -1030,24 +1223,34 @@ def render_html():
       </div>
     </div>"""
 
-    def _ratio_card(label):
+    ads_total_all = ads_spend_by_country.get("TOTAL", {})
+    ads_total_30j = ads_total_all.get("30j")
+    ads_total_7j = ads_total_all.get("7j")
+    ads_total_veille = ads_total_all.get("veille")
+
+    def _ratio_card(label, ca_value, ads_value):
+        if ads_api_live:
+            value_txt = _ratio_txt(ca_value or 0, ads_value or 0)
+        else:
+            value_txt = "En attente API Ads"
+        size = "18px" if not ads_api_live else "22px"
         return f"""
     <div class="card">
       <div class="icon-box icon-blue">📊</div>
       <div>
         <div class="stat-label">{label}</div>
-        <div class="stat-value blue" style="font-size:18px;">En attente API Ads</div>
+        <div class="stat-value blue" style="font-size:{size};">{value_txt}</div>
       </div>
     </div>"""
 
     ads_summary_cards = f"""
     <div class="grid-ads">
       {_ca_card("CA total 30 jours", ca_total_30j, "💰")}
-      {_ratio_card("Ratio CA/Ads 30 jours")}
+      {_ratio_card("Ratio CA/Ads 30 jours", ca_total_30j, ads_total_30j)}
       {_ca_card("CA total 7 jours", ca_total_7j, "💰")}
-      {_ratio_card("Ratio CA/Ads 7 jours")}
+      {_ratio_card("Ratio CA/Ads 7 jours", ca_total_7j, ads_total_7j)}
       {_ca_card("CA total veille", ca_total_veille, "💰")}
-      {_ratio_card("Ratio CA/Ads veille")}
+      {_ratio_card("Ratio CA/Ads veille", ca_total_veille, ads_total_veille)}
     </div>"""
 
     ads_card = f"""
