@@ -408,24 +408,13 @@ def get_shopify_orders_since(token, start_date):
     livraison, requete allegee car le volume peut couvrir ~2 ans de
     commandes). Sert au tableau mensuel des taux de remboursement.
     Renvoie une liste de dicts {created_at: datetime, amount: float,
-    refunded: float}.
-
-    Important : contrairement a une premiere version de ce code, on
-    N'EXCLUT PLUS les commandes annulees (status:cancelled) de la requete.
-    Une annulation Shopify s'accompagne quasi-systematiquement d'un
-    remboursement (c'est d'ailleurs ce que Shopify affiche sous
-    "Annulations de commande" dans ses propres rapports Ventes) ; exclure
-    ces commandes revenait a ignorer entierement ce remboursement, ce qui
-    faisait sous-estimer tres largement le total rembourse affiche sur le
-    dashboard. currentTotalPriceSet integre deja les remboursements/
-    ajustements (il tombe a ~0 pour une commande annulee et remboursee en
-    totalite), donc le CA net n'est pas fausse par cet ajout."""
+    refunded: float}."""
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": token,
         "Content-Type": "application/json",
     }
-    search_query = f"created_at:>='{start_date.isoformat()}'"
+    search_query = f"created_at:>='{start_date.isoformat()}' -status:cancelled"
 
     orders = []
     cursor = None
@@ -501,9 +490,7 @@ def get_shopify_orders_last_30j(token):
     }
     now = datetime.now(ZoneInfo(TIMEZONE))
     start = now - timedelta(days=30)
-    # Cf. get_shopify_orders_since : on n'exclut plus les commandes
-    # annulees, sinon leur remboursement associe disparait des totaux.
-    search_query = f"created_at:>='{start.isoformat()}'"
+    search_query = f"created_at:>='{start.isoformat()}' -status:cancelled"
 
     orders = []
     cursor = None
@@ -541,14 +528,11 @@ def get_shopify_orders_last_30j(token):
 def compute_revenue_by_country_group(orders):
     """A partir de la liste d'orders (get_shopify_orders_last_30j), calcule
     pour chaque groupe de pays (COUNTRY_GROUPS) le CA TTC sur 30 jours, sur
-    7 jours et sur la journee d'hier (calendaire, fuseau TIMEZONE). Comme les
-    rapports Shopify natifs, ces fenetres s'arretent a hier (la journee en
-    cours, forcement partielle, n'est jamais incluse dans les totaux
-    30j/7j). Renvoie {indicatif: {"30j": float, "7j": float, "veille": float}}."""
+    7 jours et sur la journee d'hier (calendaire, fuseau TIMEZONE). Renvoie
+    {indicatif: {"30j": float, "7j": float, "veille": float}}."""
     now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
     yesterday_date = (now - timedelta(days=1)).date()
-    since_30j_date = yesterday_date - timedelta(days=29)
-    since_7j_date = yesterday_date - timedelta(days=6)
 
     result = {}
     for label, countries in COUNTRY_GROUPS.items():
@@ -559,14 +543,10 @@ def compute_revenue_by_country_group(orders):
         for o in orders:
             if o["country"] not in countries_set:
                 continue
-            order_date = o["created_at"].date()
-            if order_date > yesterday_date:
-                continue  # journee en cours : exclue des totaux
-            if order_date >= since_30j_date:
-                total_30j += o["amount"]
-            if order_date >= since_7j_date:
+            total_30j += o["amount"]
+            if o["created_at"] >= since_7j:
                 total_7j += o["amount"]
-            if order_date == yesterday_date:
+            if o["created_at"].date() == yesterday_date:
                 total_veille += o["amount"]
         result[label] = {
             "30j": round(total_30j, 2),
@@ -581,23 +561,17 @@ def compute_revenue_totals(orders):
     pays inclus (contrairement a compute_revenue_by_country_group, qui ne
     regroupe que les pays suivis) - sert au total affiche en haut de
     l'onglet Ads, pour qu'il corresponde exactement a la vente totale
-    Shopify. Fenetres arretees a hier, comme compute_revenue_by_country_group
-    (la journee en cours n'est jamais incluse). Renvoie
-    {"30j": float, "7j": float, "veille": float}."""
+    Shopify. Renvoie {"30j": float, "7j": float, "veille": float}."""
     now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
     yesterday_date = (now - timedelta(days=1)).date()
-    since_30j_date = yesterday_date - timedelta(days=29)
-    since_7j_date = yesterday_date - timedelta(days=6)
 
     total_30j = total_7j = total_veille = 0.0
     for o in orders:
-        order_date = o["created_at"].date()
-        if order_date > yesterday_date:
-            continue
-        total_30j += o["amount"] if order_date >= since_30j_date else 0
-        if order_date >= since_7j_date:
+        total_30j += o["amount"]
+        if o["created_at"] >= since_7j:
             total_7j += o["amount"]
-        if order_date == yesterday_date:
+        if o["created_at"].date() == yesterday_date:
             total_veille += o["amount"]
     return {
         "30j": round(total_30j, 2),
@@ -608,26 +582,21 @@ def compute_revenue_totals(orders):
 
 def compute_refund_totals(orders):
     """Montant rembourse total, tous pays confondus, sur 30j/7j/veille -
-    meme decoupage que compute_revenue_totals (fenetres arretees a hier).
-    Renvoie {"30j": float, "7j": float, "veille": float}."""
+    meme decoupage que compute_revenue_totals. Renvoie
+    {"30j": float, "7j": float, "veille": float}."""
     now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = now - timedelta(days=7)
     yesterday_date = (now - timedelta(days=1)).date()
-    since_30j_date = yesterday_date - timedelta(days=29)
-    since_7j_date = yesterday_date - timedelta(days=6)
 
     total_30j = total_7j = total_veille = 0.0
     for o in orders:
         refunded = o.get("refunded") or 0
         if not refunded:
             continue
-        order_date = o["created_at"].date()
-        if order_date > yesterday_date:
-            continue
-        if order_date >= since_30j_date:
-            total_30j += refunded
-        if order_date >= since_7j_date:
+        total_30j += refunded
+        if o["created_at"] >= since_7j:
             total_7j += refunded
-        if order_date == yesterday_date:
+        if o["created_at"].date() == yesterday_date:
             total_veille += refunded
     return {
         "30j": round(total_30j, 2),
@@ -747,12 +716,10 @@ def compute_ads_spend_by_country_group(ads_rows):
     veille, comme compute_revenue_by_country_group cote Shopify. Renvoie
     {indicatif: {"30j":..,"7j":..,"veille":..}} + calcule aussi le total
     toutes campagnes (y compris celles sans indicatif reconnu) sous la cle
-    "TOTAL". Fenetres arretees a hier, comme cote Shopify (la journee en
-    cours n'est jamais incluse dans les totaux 30j/7j)."""
+    "TOTAL"."""
     now = datetime.now(ZoneInfo(TIMEZONE))
+    since_7j = (now - timedelta(days=7)).date()
     yesterday_date = (now - timedelta(days=1)).date()
-    since_30j_date = yesterday_date - timedelta(days=29)
-    since_7j_date = yesterday_date - timedelta(days=6)
 
     totals = {}
     grand_total = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
@@ -764,14 +731,11 @@ def compute_ads_spend_by_country_group(ads_rows):
             row_date = datetime.strptime(row["date"], "%Y-%m-%d").date()
         except (KeyError, ValueError):
             continue
-        if row_date > yesterday_date:
-            continue
         cost = row["cost"]
         entry = totals.setdefault(label, {"30j": 0.0, "7j": 0.0, "veille": 0.0})
-        if row_date >= since_30j_date:
-            entry["30j"] += cost
-            grand_total["30j"] += cost
-        if row_date >= since_7j_date:
+        entry["30j"] += cost
+        grand_total["30j"] += cost
+        if row_date >= since_7j:
             entry["7j"] += cost
             grand_total["7j"] += cost
         if row_date == yesterday_date:
@@ -1099,17 +1063,6 @@ def refresh_cache(startup=False):
                 history_orders = get_shopify_orders_since(token, history_start)
                 monthly_refund_rates = compute_monthly_refund_rates(history_orders, now.year)
                 monthly_refund_computed_date = today
-                oldest = min((o["created_at"] for o in history_orders), default=None)
-                print(
-                    f"[Remboursements/mois] {len(history_orders)} commandes recuperees, "
-                    f"demande depuis {history_start.date()}, la plus ancienne recue date du "
-                    f"{oldest.date() if oldest else 'N/A'} (si cette date est ~60 jours avant "
-                    "aujourd'hui alors que history_start demande ~2 ans, c'est que l'app Shopify "
-                    "n'a acces qu'aux commandes recentes : il faut activer l'acces 'commandes "
-                    "historiques' / 'read_all_orders' - Protected customer data - dans les "
-                    "parametres de l'app sur le Partner Dashboard).",
-                    flush=True,
-                )
             except Exception as history_exc:  # noqa: BLE001
                 monthly_refund_rates = _cache.get("monthly_refund_rates") or []
                 monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
@@ -1198,9 +1151,6 @@ def format_date_fr(d):
 def render_html():
     today_label = format_date_fr(datetime.now(ZoneInfo(TIMEZONE)))
     refresh_seconds = current_refresh_seconds()
-
-    def fmt_eur(value):
-        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
     with _cache_lock:
         a_traiter = _cache["a_traiter"]
         a_traiter_by_store = dict(_cache["a_traiter_by_store"])
@@ -1366,7 +1316,7 @@ def render_html():
         "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
         "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
     ]
-    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
+    current_year = now.year
 
     def _month_pct(rate):
         if rate is None:
@@ -1459,6 +1409,9 @@ def render_html():
       <div class="carriers-title">Mails non lus par boîte <span>(toute la boîte de réception)</span></div>
       {gmail_label_rows}
     </div>"""
+
+    def fmt_eur(value):
+        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
 
     ADS_MIN_CA_30J = 500.0
 
