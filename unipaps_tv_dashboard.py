@@ -429,7 +429,10 @@ def get_shopify_orders_since(token, start_date):
         "X-Shopify-Access-Token": token,
         "Content-Type": "application/json",
     }
-    search_query = f"created_at:>='{start_date.isoformat()}'"
+    # status:any est indispensable : sans filtre de statut explicite,
+    # Shopify ne renvoie par defaut que les commandes "open", en excluant
+    # silencieusement les commandes annulees/fermees de la recherche.
+    search_query = f"created_at:>='{start_date.isoformat()}' status:any"
 
     orders = []
     cursor = None
@@ -517,7 +520,9 @@ def get_shopify_orders_last_30j(token):
     start = now - timedelta(days=30)
     # Cf. get_shopify_orders_since : on n'exclut plus les commandes
     # annulees, sinon leur remboursement associe disparait des totaux.
-    search_query = f"created_at:>='{start.isoformat()}'"
+    # status:any : idem get_shopify_orders_since, sinon les commandes
+    # annulees sont exclues par defaut par l'API Shopify.
+    search_query = f"created_at:>='{start.isoformat()}' status:any"
 
     orders = []
     cursor = None
