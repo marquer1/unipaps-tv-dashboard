@@ -822,7 +822,10 @@ def get_sales_by_country_ql(token):
     les autres - via ShopifyQL, groupe par pays de livraison (correspond a
     ce qu'utilisait deja le dashboard). Renvoie
     {indicatif: {"30j": float, "7j": float, "veille": float}}."""
-    result = {label: {"30j": 0.0, "7j": 0.0, "veille": 0.0} for label in COUNTRY_GROUPS}
+    # "OTHER" regroupe tout pays hors de COUNTRY_GROUPS (reste du monde, ou
+    # pays de livraison inconnu/non reconnu), pour que la somme du tableau
+    # colle exactement au CA TTC total (qui inclut TOUS les pays).
+    result = {label: {"30j": 0.0, "7j": 0.0, "veille": 0.0} for label in list(COUNTRY_GROUPS) + ["OTHER"]}
     for window in ("30j", "7j", "veille"):
         if window != "30j":
             # Seuls les groupes "detailles" (France) ont besoin du detail
@@ -833,13 +836,21 @@ def get_sales_by_country_ql(token):
             token, f"FROM sales SHOW total_sales GROUP BY shipping_country {clause}"
         )
         for row in rows:
+            amount = float(row.get("total_sales") or 0)
             code = COUNTRY_NAME_TO_CODE.get(row.get("shipping_country") or "")
-            if not code:
-                continue
-            for label, countries in COUNTRY_GROUPS.items():
-                if code in countries:
-                    if window == "30j" or label in COUNTRY_GROUPS_DETAILED:
-                        result[label][window] += float(row.get("total_sales") or 0)
+            matched_label = None
+            if code:
+                for label, countries in COUNTRY_GROUPS.items():
+                    if code in countries:
+                        matched_label = label
+                        break
+            if matched_label:
+                if window == "30j" or matched_label in COUNTRY_GROUPS_DETAILED:
+                    result[matched_label][window] += amount
+            else:
+                # Pays non reconnu/non suivi : toujours compte, sur toutes
+                # les fenetres, pour que le total reste exact.
+                result["OTHER"][window] += amount
     for label in result:
         for k in result[label]:
             result[label][k] = round(result[label][k], 2)
@@ -1037,15 +1048,26 @@ def compute_revenue_by_country_group(orders):
     since_30j_date = yesterday_date - timedelta(days=29)
     since_7j_date = yesterday_date - timedelta(days=6)
 
+    # Tous les codes pays suivis individuellement (COUNTRY_GROUPS) - tout
+    # pays hors de cette liste (reste du monde, ou pays de livraison
+    # manquant) est regroupe dans le bucket "OTHER", pour que la somme du
+    # tableau colle exactement au CA TTC total affiche au-dessus (qui, lui,
+    # inclut TOUS les pays sans exception).
+    all_tracked_countries = {c for countries in COUNTRY_GROUPS.values() for c in countries}
+
     result = {}
-    for label, countries in COUNTRY_GROUPS.items():
-        countries_set = set(countries)
+    for label, countries in list(COUNTRY_GROUPS.items()) + [("OTHER", None)]:
+        countries_set = set(countries) if countries else None
         total_30j = 0.0
         total_7j = 0.0
         total_veille = 0.0
         for o in orders:
-            if o["country"] not in countries_set:
-                continue
+            if countries_set is not None:
+                if o["country"] not in countries_set:
+                    continue
+            else:
+                if o["country"] in all_tracked_countries:
+                    continue  # deja compte dans un groupe suivi
             order_date = o["created_at"].date()
             if order_date > yesterday_date:
                 continue  # journee en cours : exclue des totaux
@@ -1915,6 +1937,20 @@ def render_html():
     others_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
     others_ads_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
     has_others = False
+
+    # Bucket "OTHER" (pays hors COUNTRY_GROUPS) : toujours regroupe dans la
+    # ligne "Autres pays", pour que la somme du tableau colle au CA TTC
+    # total affiche au-dessus, meme quand ce bucket a lui seul depasse
+    # ADS_MIN_CA_30J.
+    other_entry = revenue_by_country.get("OTHER")
+    if other_entry and any(other_entry.get(k) for k in others_totals):
+        has_others = True
+        for key in others_totals:
+            others_totals[key] += other_entry.get(key) or 0
+        other_ads_entry = ads_spend_by_country.get("OTHER") or {}
+        for key in others_ads_totals:
+            others_ads_totals[key] += other_ads_entry.get(key) or 0
+
     sorted_labels = sorted(
         COUNTRY_GROUPS,
         key=lambda l: (revenue_by_country.get(l) or {}).get("30j", 0) or 0,
