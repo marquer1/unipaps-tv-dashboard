@@ -825,18 +825,20 @@ def get_sales_by_country_ql(token):
     # "OTHER" regroupe tout pays hors de COUNTRY_GROUPS (reste du monde, ou
     # pays de livraison inconnu/non reconnu), pour que la somme du tableau
     # colle exactement au CA TTC total (qui inclut TOUS les pays).
-    result = {label: {"30j": 0.0, "7j": 0.0, "veille": 0.0} for label in list(COUNTRY_GROUPS) + ["OTHER"]}
+    result = {label: {"30j": 0.0, "count_30j": 0, "7j": 0.0, "veille": 0.0} for label in list(COUNTRY_GROUPS) + ["OTHER"]}
     for window in ("30j", "7j", "veille"):
         if window != "30j":
             # Seuls les groupes "detailles" (France) ont besoin du detail
             # 7j/veille - on ne refait la requete par pays que pour ceux-la.
             pass
         clause = _sales_window_clause(window)
+        show_cols = "total_sales, orders" if window == "30j" else "total_sales"
         rows = run_shopifyql(
-            token, f"FROM sales SHOW total_sales GROUP BY shipping_country {clause}"
+            token, f"FROM sales SHOW {show_cols} GROUP BY shipping_country {clause}"
         )
         for row in rows:
             amount = float(row.get("total_sales") or 0)
+            count = int(float(row.get("orders") or 0)) if window == "30j" else 0
             code = COUNTRY_NAME_TO_CODE.get(row.get("shipping_country") or "")
             matched_label = None
             if code:
@@ -847,13 +849,18 @@ def get_sales_by_country_ql(token):
             if matched_label:
                 if window == "30j" or matched_label in COUNTRY_GROUPS_DETAILED:
                     result[matched_label][window] += amount
+                if window == "30j":
+                    result[matched_label]["count_30j"] += count
             else:
                 # Pays non reconnu/non suivi : toujours compte, sur toutes
                 # les fenetres, pour que le total reste exact.
                 result["OTHER"][window] += amount
+                if window == "30j":
+                    result["OTHER"]["count_30j"] += count
     for label in result:
         for k in result[label]:
-            result[label][k] = round(result[label][k], 2)
+            if k != "count_30j":
+                result[label][k] = round(result[label][k], 2)
     return result
 
 
@@ -1061,6 +1068,7 @@ def compute_revenue_by_country_group(orders):
         total_30j = 0.0
         total_7j = 0.0
         total_veille = 0.0
+        count_30j = 0
         for o in orders:
             if countries_set is not None:
                 if o["country"] not in countries_set:
@@ -1073,12 +1081,14 @@ def compute_revenue_by_country_group(orders):
                 continue  # journee en cours : exclue des totaux
             if order_date >= since_30j_date:
                 total_30j += o["amount"]
+                count_30j += 1
             if order_date >= since_7j_date:
                 total_7j += o["amount"]
             if order_date == yesterday_date:
                 total_veille += o["amount"]
         result[label] = {
             "30j": round(total_30j, 2),
+            "count_30j": count_30j,
             "7j": round(total_7j, 2),
             "veille": round(total_veille, 2),
         }
@@ -1920,8 +1930,11 @@ def render_html():
             ads_class = ' class="ads-indispo"'
         ca_30j = entry.get("30j") or 0
         bar_pct = round(100 * ca_30j / ca_total_30j, 1) if ca_total_30j else 0
+        count_30j = entry.get("count_30j")
+        count_col = str(count_30j) if count_30j is not None else "—"
         return f"""
         <tr>
+          <td class="ads-count">{count_col}</td>
           <td><span class="country-name">{display_name}</span>{_pct_ca(entry.get("30j"))}</td>
           <td class="ca-cell">
             <div class="ca-bar-wrap">
@@ -1934,7 +1947,7 @@ def render_html():
         </tr>"""
 
     ads_rows = ""
-    others_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
+    others_totals = {"30j": 0.0, "count_30j": 0, "7j": 0.0, "veille": 0.0}
     others_ads_totals = {"30j": 0.0, "7j": 0.0, "veille": 0.0}
     has_others = False
 
@@ -1943,7 +1956,7 @@ def render_html():
     # total affiche au-dessus, meme quand ce bucket a lui seul depasse
     # ADS_MIN_CA_30J.
     other_entry = revenue_by_country.get("OTHER")
-    if other_entry and any(other_entry.get(k) for k in others_totals):
+    if other_entry and any(other_entry.get(k) for k in ("30j", "7j", "veille")):
         has_others = True
         for key in others_totals:
             others_totals[key] += other_entry.get(key) or 0
@@ -1963,6 +1976,7 @@ def render_html():
         if entry is None:
             ads_rows += f"""
         <tr>
+          <td class="ads-count">—</td>
           <td>{display_name}</td>
           <td colspan="3" class="ads-indispo">Indisponible</td>
         </tr>"""
@@ -1979,7 +1993,7 @@ def render_html():
     if has_others:
         ads_rows += _ads_row(
             "🌍 Autres pays",
-            {k: round(v, 2) for k, v in others_totals.items()},
+            {k: (round(v, 2) if k != "count_30j" else v) for k, v in others_totals.items()},
             {k: round(v, 2) for k, v in others_ads_totals.items()},
         )
 
@@ -2047,6 +2061,7 @@ def render_html():
       <table class="ads-table">
         <thead>
           <tr>
+            <th>Commandes</th>
             <th>Pays</th>
             <th>CA TTC 30J</th>
             <th>Dépenses Google Ads</th>
@@ -2187,6 +2202,7 @@ def render_html():
   .ads-table tbody tr:nth-child(even) {{ background: #f7f9fd; }}
   .ads-table tbody tr:hover {{ background: #eef4ff; }}
   .country-name {{ font-size: 15px; font-weight: 700; color: #1f2733; }}
+  .ads-count {{ color: #8b95a5; font-weight: 600; text-align: center; }}
   .ads-indispo {{ color: #b7bec9; font-weight: 500; font-style: italic; }}
   .ads-pct {{ color: #8b95a5; font-weight: 500; font-size: 13px; }}
   .ca-cell {{ min-width: 220px; }}
