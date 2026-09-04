@@ -296,8 +296,6 @@ _cache = {
     "revenue_by_country": {},
     "revenue_totals": {},
     "refund_totals": {},
-    "monthly_refund_rates": [],
-    "monthly_refund_computed_date": None,
     "ads_spend_by_country": {},
     "a_traiter_by_store": {},
     "updated_at": None,
@@ -381,101 +379,6 @@ query($query: String!, $cursor: String) {
   }
 }
 """
-
-# Requete allegee (pas de pays de livraison) pour l'historique des
-# remboursements par mois, qui porte sur ~2 ans de commandes plutot que
-# les 30 derniers jours.
-ORDERS_REFUND_HISTORY_QUERY = """
-query($query: String!, $cursor: String) {
-  orders(first: 250, after: $cursor, query: $query) {
-    edges {
-      cursor
-      node {
-        createdAt
-        currentTotalPriceSet { shopMoney { amount } }
-        totalRefundedSet { shopMoney { amount } }
-      }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
-
-
-def get_shopify_orders_since(token, start_date):
-    """Recupere toutes les commandes (hors annulees) depuis start_date,
-    avec leur montant net et rembourse uniquement (pas de pays de
-    livraison, requete allegee car le volume peut couvrir ~2 ans de
-    commandes). Sert au tableau mensuel des taux de remboursement.
-    Renvoie une liste de dicts {created_at: datetime, amount: float,
-    refunded: float}."""
-    url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
-    headers = {
-        "X-Shopify-Access-Token": token,
-        "Content-Type": "application/json",
-    }
-    search_query = f"created_at:>='{start_date.isoformat()}' -status:cancelled"
-
-    orders = []
-    cursor = None
-    while True:
-        payload = {
-            "query": ORDERS_REFUND_HISTORY_QUERY,
-            "variables": {"query": search_query, "cursor": cursor},
-        }
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if "errors" in data:
-            raise RuntimeError(str(data["errors"]))
-        block = data["data"]["orders"]
-        for edge in block["edges"]:
-            node = edge["node"]
-            try:
-                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
-            except (TypeError, ValueError):
-                continue
-            amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
-            refunded = float((node.get("totalRefundedSet") or {}).get("shopMoney", {}).get("amount", 0) or 0)
-            orders.append({"created_at": created_at, "amount": amount, "refunded": refunded})
-        if block["pageInfo"]["hasNextPage"]:
-            cursor = block["pageInfo"]["endCursor"]
-        else:
-            break
-    return orders
-
-
-def compute_monthly_refund_rates(orders, current_year):
-    """A partir d'une liste d'orders (get_shopify_orders_since, depuis le
-    1er janvier de l'annee precedente), calcule le taux de remboursement
-    (rembourse / CA brut) par mois, annee en cours vs annee precedente.
-    Renvoie une liste de 12 dicts (janvier a decembre, dans l'ordre) :
-    {"month": int, "rate_cur": float|None, "rate_prev": float|None}."""
-    buckets = {}
-    for o in orders:
-        key = (o["created_at"].year, o["created_at"].month)
-        b = buckets.setdefault(key, {"net": 0.0, "refunded": 0.0})
-        b["net"] += o["amount"]
-        b["refunded"] += o.get("refunded") or 0
-
-    def _rate(bucket):
-        if not bucket:
-            return None
-        gross = bucket["net"] + bucket["refunded"]
-        if not gross:
-            return None
-        return 100 * bucket["refunded"] / gross
-
-    result = []
-    for month in range(1, 13):
-        result.append(
-            {
-                "month": month,
-                "rate_cur": _rate(buckets.get((current_year, month))),
-                "rate_prev": _rate(buckets.get((current_year - 1, month))),
-            }
-        )
-    return result
 
 
 def get_shopify_orders_last_30j(token):
@@ -945,7 +848,7 @@ def get_gmail_unread_older_than_24h():
     return len(seen_threads), senders
 
 
-def refresh_cache(startup=False):
+def refresh_cache():
     try:
         token = get_access_token()
 
@@ -1041,36 +944,6 @@ def refresh_cache(startup=False):
             refund_totals = {}
             print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_exc}", flush=True)
 
-        # Taux de remboursement mensuel (annee en cours vs annee
-        # precedente) : porte sur ~2 ans de commandes, donc beaucoup plus
-        # lourd que le CA 30j. Recalcule une seule fois par jour (pas a
-        # chaque cycle de refresh_cache, qui tourne toutes les
-        # REFRESH_MINUTES) pour ne pas multiplier inutilement les appels
-        # a l'API Shopify sur un gros volume de commandes. Jamais calcule
-        # au demarrage (startup=True, appele une seule fois de maniere
-        # synchrone par main() avant que le serveur HTTP n'ecoute) : sur
-        # une grosse boutique, aller chercher ~2 ans de commandes pourrait
-        # retarder l'ouverture du port et faire echouer le healthcheck /
-        # timeout de deploiement sur Render. Le premier cycle en tache de
-        # fond (background_refresher) s'en charge quelques minutes plus
-        # tard, sans bloquer personne.
-        monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-        if startup or monthly_refund_computed_date == today:
-            monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-        else:
-            try:
-                history_start = datetime(now.year - 1, 1, 1, tzinfo=ZoneInfo(TIMEZONE))
-                history_orders = get_shopify_orders_since(token, history_start)
-                monthly_refund_rates = compute_monthly_refund_rates(history_orders, now.year)
-                monthly_refund_computed_date = today
-            except Exception as history_exc:  # noqa: BLE001
-                monthly_refund_rates = _cache.get("monthly_refund_rates") or []
-                monthly_refund_computed_date = _cache.get("monthly_refund_computed_date")
-                print(
-                    f"[Remboursements/mois] Erreur lors du calcul de l'historique : {history_exc}",
-                    flush=True,
-                )
-
         # Depenses Google Ads par pays : idem, isole dans son propre
         # try/except. Reste vide (donc "En attente API Ads" cote affichage)
         # tant que le Basic access Google Ads n'est pas valide.
@@ -1102,8 +975,6 @@ def refresh_cache(startup=False):
             _cache["revenue_by_country"] = revenue_by_country
             _cache["revenue_totals"] = revenue_totals
             _cache["refund_totals"] = refund_totals
-            _cache["monthly_refund_rates"] = monthly_refund_rates
-            _cache["monthly_refund_computed_date"] = monthly_refund_computed_date
             _cache["ads_spend_by_country"] = ads_spend_by_country
             _cache["updated_at"] = now.strftime("%d/%m/%Y %H:%M:%S")
             _cache["error"] = None
@@ -1151,9 +1022,6 @@ def format_date_fr(d):
 def render_html():
     today_label = format_date_fr(datetime.now(ZoneInfo(TIMEZONE)))
     refresh_seconds = current_refresh_seconds()
-
-    def fmt_eur(value):
-        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
     with _cache_lock:
         a_traiter = _cache["a_traiter"]
         a_traiter_by_store = dict(_cache["a_traiter_by_store"])
@@ -1167,7 +1035,6 @@ def render_html():
         revenue_by_country = dict(_cache["revenue_by_country"])
         revenue_totals = dict(_cache["revenue_totals"])
         refund_totals = dict(_cache["refund_totals"])
-        monthly_refund_rates = list(_cache["monthly_refund_rates"])
         ads_spend_by_country = dict(_cache["ads_spend_by_country"])
         updated_at = _cache["updated_at"] or "..."
         error = _cache["error"]
@@ -1311,66 +1178,6 @@ def render_html():
       </div>
     </div>"""
 
-    # Tableau mensuel du taux de remboursement, annee en cours vs annee
-    # precedente (janvier a decembre). Presente en 2 blocs de 6 mois cote
-    # a cote pour rester compact en hauteur sur l'ecran TV plutot qu'une
-    # liste verticale de 12 lignes.
-    MONTH_LABELS_FR = [
-        "Janv.", "Févr.", "Mars", "Avr.", "Mai", "Juin",
-        "Juil.", "Août", "Sept.", "Oct.", "Nov.", "Déc.",
-    ]
-    current_year = datetime.now(ZoneInfo(TIMEZONE)).year
-
-    def _month_pct(rate):
-        if rate is None:
-            return "—"
-        return f"{rate:.1f}%".replace(".", ",")
-
-    def _month_pill(rate):
-        if rate is None:
-            return '<span class="ratio-pill ratio-neutral">—</span>'
-        if rate <= 3:
-            color = "ratio-good"
-        elif rate <= 7:
-            color = "ratio-mid"
-        else:
-            color = "ratio-bad"
-        return f'<span class="ratio-pill {color}">{_month_pct(rate)}</span>'
-
-    def _month_row(entry):
-        label = MONTH_LABELS_FR[entry["month"] - 1]
-        return f"""
-        <tr>
-          <td>{label}</td>
-          <td class="month-prev">{_month_pct(entry["rate_prev"])}</td>
-          <td>{_month_pill(entry["rate_cur"])}</td>
-        </tr>"""
-
-    if len(monthly_refund_rates) == 12:
-        months_h1 = monthly_refund_rates[0:6]
-        months_h2 = monthly_refund_rates[6:12]
-
-        def _month_table(months):
-            rows = "".join(_month_row(e) for e in months)
-            return f"""
-        <table class="month-table">
-          <thead>
-            <tr><th>Mois</th><th>{current_year - 1}</th><th>{current_year}</th></tr>
-          </thead>
-          <tbody>{rows}</tbody>
-        </table>"""
-
-        monthly_refund_card = f"""
-    <div class="carriers-card">
-      <div class="carriers-title">Taux de remboursement par mois &mdash; {current_year} vs {current_year - 1}</div>
-      <div class="month-tables">
-        {_month_table(months_h1)}
-        {_month_table(months_h2)}
-      </div>
-    </div>"""
-    else:
-        monthly_refund_card = ""
-
     # A partir de PREDICTION_HOUR (15h par defaut), on affiche la repartition
     # des commandes a traiter par boutique, dans le meme style que la liste
     # des expediteurs des mails +24h.
@@ -1412,6 +1219,9 @@ def render_html():
       <div class="carriers-title">Mails non lus par boîte <span>(toute la boîte de réception)</span></div>
       {gmail_label_rows}
     </div>"""
+
+    def fmt_eur(value):
+        return f"{value:,.0f} €".replace(",", " ") if value is not None else "—"
 
     ADS_MIN_CA_30J = 500.0
 
@@ -1720,14 +1530,6 @@ def render_html():
   .ratio-mid {{ background: #fdf1dc; color: #b3701a; }}
   .ratio-bad {{ background: #fde4e4; color: #c23434; }}
   .ratio-neutral {{ background: #eef1f7; color: #8b95a5; }}
-  .month-tables {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }}
-  .month-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-  .month-table th {{ text-align: left; font-size: 11px; letter-spacing: 0.04em; color: #8b95a5; text-transform: uppercase; font-weight: 700; padding: 6px 8px; border-bottom: 2px solid #e5e9f0; }}
-  .month-table th:not(:first-child), .month-table td:not(:first-child) {{ text-align: right; }}
-  .month-table td {{ padding: 6px 8px; border-bottom: 1px solid #f0f2f6; font-weight: 600; }}
-  .month-table tr:last-child td {{ border-bottom: none; }}
-  .month-prev {{ color: #8b95a5; font-weight: 500; }}
-  @media (max-width: 700px) {{ .month-tables {{ grid-template-columns: 1fr; }} }}
   .card {{
     background: #ffffff; border-radius: 16px; padding: 18px 24px;
     box-shadow: 0 2px 10px rgba(20,30,50,0.06);
@@ -1856,7 +1658,6 @@ def render_html():
     </div>
     {gmail_labels_card}
     {gmail_24h_senders_card}
-    {monthly_refund_card}
   </div>
 
   <div id="tab-ads" class="tab-panel" hidden>
@@ -2003,7 +1804,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     if CLIENT_ID.startswith("REMPLACE_MOI") or CLIENT_SECRET.startswith("REMPLACE_MOI"):
         print("!! Pense a definir SHOPIFY_CLIENT_ID et SHOPIFY_CLIENT_SECRET !!")
-    refresh_cache(startup=True)
+    refresh_cache()
     t = threading.Thread(target=background_refresher, daemon=True)
     t.start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
