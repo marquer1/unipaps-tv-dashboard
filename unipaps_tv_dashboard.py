@@ -2179,11 +2179,12 @@ def render_html():
 <style>
   * {{ box-sizing: border-box; }}
   html, body {{
-    margin: 0; padding: 0; min-height: 100%;
+    margin: 0; padding: 0; min-height: 100%; height: 100%;
     background: #f2f4f7; color: #1a1f29;
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    overflow: hidden;
   }}
-  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; }}
+  .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; transform-origin: top center; }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
   .grid-bottom-3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
@@ -2401,6 +2402,40 @@ def render_html():
   var REFRESH_MS = {refresh_seconds} * 1000;
   var _refreshFailCount = 0;
 
+  // Certaines TV (webOS, Tizen, box Android...) rendent la page avec une
+  // taille de texte/DPI plus grande qu'un navigateur desktop, ce qui fait
+  // deborder le contenu (obligation de scroller). Plutot que de fixer une
+  // seule police plus petite (qui serait alors trop petite sur un vrai
+  // ecran d'ordinateur), on mesure la hauteur/largeur reelle du contenu et
+  // on applique un zoom (CSS transform: scale) juste ce qu'il faut pour
+  // que tout tienne dans la fenetre, sans jamais agrandir au-dela de 100%.
+  function fitToScreen() {{
+    var wrap = document.querySelector('.wrap');
+    if (!wrap) return;
+    wrap.style.transform = 'none';
+    wrap.style.width = '';
+    wrap.style.margin = '';
+    var scale = Math.min(window.innerHeight / wrap.scrollHeight, 1);
+    if (scale < 1) {{
+      // On reduit uniquement pour que ca tienne en hauteur (pas de
+      // deformation du texte), puis on elargit la largeur naturelle du
+      // contenu dans la meme proportion pour que, une fois reduit, il
+      // occupe quand meme toute la largeur de l'ecran. On ancre le zoom
+      // en haut a gauche (au lieu du centre par defaut) et on retire le
+      // margin: 0 auto habituel : ainsi, une fois reduit, le contenu
+      // colle exactement au bord gauche ET au bord droit de l'ecran
+      // (largeur affichee = innerWidth / scale * scale = innerWidth
+      // pile), sans bande blanche ni decoupe d'un cote.
+      wrap.style.width = (window.innerWidth / scale) + 'px';
+      wrap.style.margin = '0';
+      wrap.style.transformOrigin = 'top left';
+      wrap.style.transform = 'scale(' + scale + ')';
+    }} else {{
+      wrap.style.transformOrigin = 'top center';
+    }}
+  }}
+  window.addEventListener('resize', fitToScreen);
+
   function refreshContent() {{
     fetch(location.href, {{ cache: 'no-store' }})
       .then(function(res) {{
@@ -2420,6 +2455,7 @@ def render_html():
         // on reapplique l'onglet reellement affiche cote client pour ne
         // pas provoquer un saut d'onglet au passage.
         if (activeTab) {{ showTab(activeTab); }}
+        fitToScreen();
       }})
       .catch(function(err) {{
         _refreshFailCount++;
@@ -2460,6 +2496,7 @@ def render_html():
     if (manual) {{
       try {{ localStorage.setItem('unipaps_manual_until', String(Date.now() + MANUAL_PAUSE_MS)); }} catch (e) {{}}
     }}
+    fitToScreen();
   }}
 
   // Onglet "du moment" calcule a partir de l'heure reelle (et non d'un
@@ -2498,6 +2535,7 @@ def render_html():
       showTab(currentAutoTab());
       startAutoRotate();
     }}
+    fitToScreen();
   }})();
 </script>
 </body>
