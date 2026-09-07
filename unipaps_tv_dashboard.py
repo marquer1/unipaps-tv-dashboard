@@ -1602,21 +1602,26 @@ def refresh_cache(startup=False):
         # manuelle via l'API Orders classique en cas d'echec, plutot que
         # d'afficher des zeros.
         try:
-            revenue_totals, refund_totals = get_sales_summary_ql(token)
+            revenue_totals, _unused_refund_totals = get_sales_summary_ql(token)
             revenue_by_country = get_sales_by_country_ql(token)
         except Exception as revenue_exc:  # noqa: BLE001
             print(f"[CA/pays] ShopifyQL indisponible, fallback API Orders : {revenue_exc}", flush=True)
+            # NB : on ne recupere plus les commandes annulees/retours ici
+            # (get_cancelled_orders_last_30j / get_closed_returns_last_30j) -
+            # elles servaient uniquement a calculer refund_totals, qui n'est
+            # plus affiche nulle part depuis le retrait des remboursements de
+            # l'onglet SAV. Ces 2 requetes etaient de loin les plus lourdes
+            # du dashboard (elles paginaient TOUTES les commandes touchees
+            # sur 30 jours, pas seulement les annulees/remboursees), et
+            # tournaient a chaque cycle de rafraichissement pour rien -
+            # c'etait le principal poste de consommation de bande passante.
             try:
                 orders_30j = get_shopify_orders_last_30j(token)
-                cancelled_30j = get_cancelled_orders_last_30j(token)
-                closed_returns_30j = get_closed_returns_last_30j(token)
                 revenue_by_country = compute_revenue_by_country_group(orders_30j)
                 revenue_totals = compute_revenue_totals(orders_30j)
-                refund_totals = compute_refund_totals(cancelled_30j, closed_returns_30j)
             except Exception as revenue_fallback_exc:  # noqa: BLE001
                 revenue_by_country = {}
                 revenue_totals = {}
-                refund_totals = {}
                 print(f"[CA/pays] Erreur lors du calcul du CA par pays : {revenue_fallback_exc}", flush=True)
 
         # Remboursements retires de l'onglet SAV (donnees non fiables via
