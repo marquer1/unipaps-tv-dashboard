@@ -42,6 +42,7 @@ INSTALLATION (sur le mini-PC branche a la TV)
 ------------------------------------------------------------------
 """
 
+import base64
 import os
 import time
 import threading
@@ -2168,13 +2169,23 @@ def render_html():
     # toujours le logo au chargement comme avant.
     _TAB_ORDER = ["commandes", "sav", "ads"]
     _initial_tab = _TAB_ORDER[int(time.time() // 10) % len(_TAB_ORDER)]
-    initial_logo_b64 = LOGO_B64 if _initial_tab == "ads" else LOGO_A2C_B64
+    # Les logos sont servis via des routes dediees (/logo-unipaps.png,
+    # /logo-a2c.png), mises en cache longue duree par le navigateur, au
+    # lieu d'etre reinjectes en base64 dans le HTML a chaque chargement.
+    # Avant ce changement, chaque rafraichissement (toutes les 1 min en
+    # continu) retelechargeait ~250 Ko de logos en double (une fois dans
+    # le <img>, une fois dans le <script>) : l'essentiel du poids de la
+    # page. Avec cette optimisation, un rafraichissement ne pese plus que
+    # quelques Ko de HTML/donnees, ce qui rend un hebergement cloud (type
+    # Render) a nouveau largement viable niveau bande passante.
+    initial_logo_src = "/logo-unipaps.png?v=1" if _initial_tab == "ads" else "/logo-a2c.png?v=1"
 
     return f"""<!doctype html>
 <html lang="fr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" href="/favicon.ico?v=a2c1">
 <title>A2C Digital - Dashboard</title>
 <style>
   * {{ box-sizing: border-box; }}
@@ -2183,6 +2194,14 @@ def render_html():
     background: #f2f4f7; color: #1a1f29;
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     overflow: hidden;
+  }}
+  /* Sur mobile, on garde un affichage responsive classique qui defile
+     normalement (comme n'importe quel site) : le zoom auto-adapte a la
+     hauteur d'ecran (pense pour la TV, ou le scroll est impossible/genant)
+     n'a pas sa place ici, sinon tout se retrouve minuscule sur un ecran
+     de telephone (peu de hauteur visible = zoom tres agressif). */
+  @media (max-width: 700px) {{
+    html, body {{ overflow: auto; height: auto; }}
   }}
   .wrap {{ max-width: 1500px; margin: 0 auto; padding: 18px 36px; min-height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; justify-content: flex-start; transform-origin: top center; }}
   .grid-top {{ display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 18px; margin-bottom: 18px; }}
@@ -2316,7 +2335,7 @@ def render_html():
 <body>
 <div class="wrap">
   <div class="brand-header">
-    <img id="brand-logo-img" class="brand-logo" src="data:image/png;base64,{initial_logo_b64}" alt="Unipap's">
+    <img id="brand-logo-img" class="brand-logo" src="{initial_logo_src}" alt="Unipap's">
   </div>
   {error_banner}
 
@@ -2415,6 +2434,9 @@ def render_html():
     wrap.style.transform = 'none';
     wrap.style.width = '';
     wrap.style.margin = '';
+    // Sur mobile (ecran etroit), on laisse l'affichage responsive habituel
+    // defiler normalement au lieu d'appliquer le zoom pense pour la TV.
+    if (window.innerWidth <= 700) {{ return; }}
     var scale = Math.min(window.innerHeight / wrap.scrollHeight, 1);
     if (scale < 1) {{
       // On reduit uniquement pour que ca tienne en hauteur (pas de
@@ -2479,8 +2501,8 @@ def render_html():
   // TOUJOURS (flag permanent en localStorage, jamais remis a zero) :
   // l'ecran restait bloque sur un seul onglet indefiniment.
   var MANUAL_PAUSE_MS = 3 * 60 * 1000;
-  var LOGO_UNIPAPS = "data:image/png;base64,{LOGO_B64}";
-  var LOGO_A2C = "data:image/png;base64,{LOGO_A2C_B64}";
+  var LOGO_UNIPAPS = "/logo-unipaps.png?v=1";
+  var LOGO_A2C = "/logo-a2c.png?v=1";
   // Logo A2C Digital sur les 2 premiers onglets (Commandes, SAV), logo
   // Unipap's conserve sur l'onglet Ads.
   var LOGO_BY_TAB = {{ commandes: LOGO_A2C, sav: LOGO_A2C, ads: LOGO_UNIPAPS }};
@@ -2548,6 +2570,41 @@ def render_html():
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
+            # Le favicon est servi a part (route dediee, mise en cache
+            # longue duree cote navigateur) plutot que d'etre re-integre
+            # au HTML : sinon, comme les logos sont deja en base64 dans
+            # la page, on doublerait le poids de chaque rafraichissement
+            # (cf. discussion bande passante) pour une icone qui ne
+            # change jamais.
+            if self.path.startswith("/favicon"):
+                try:
+                    favicon_bytes = base64.b64decode(LOGO_A2C_B64)
+                except Exception:  # noqa: BLE001
+                    favicon_bytes = b""
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "public, max-age=604800")
+                self.send_header("Content-Length", str(len(favicon_bytes)))
+                self.end_headers()
+                self.wfile.write(favicon_bytes)
+                return
+            # Logos servis a part et mis en cache par le navigateur (voir
+            # commentaire dans render_html) plutot que reinjectes en
+            # base64 dans chaque page : c'etait de loin le principal
+            # poste de bande passante du dashboard.
+            if self.path.startswith("/logo-unipaps.png") or self.path.startswith("/logo-a2c.png"):
+                b64_source = LOGO_B64 if "unipaps" in self.path else LOGO_A2C_B64
+                try:
+                    logo_bytes = base64.b64decode(b64_source)
+                except Exception:  # noqa: BLE001
+                    logo_bytes = b""
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "public, max-age=604800")
+                self.send_header("Content-Length", str(len(logo_bytes)))
+                self.end_headers()
+                self.wfile.write(logo_bytes)
+                return
             html = render_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
