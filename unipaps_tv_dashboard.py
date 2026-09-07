@@ -312,6 +312,21 @@ _cache = {
 }
 
 
+def _parse_shopify_datetime(value):
+    """Parse une date/heure ISO8601 renvoyee par Shopify (ex:
+    "2026-08-08T09:48:16Z"). datetime.fromisoformat() ne sait lire le
+    suffixe "Z" qu'a partir de Python 3.11 - sur une version plus ancienne
+    (ex: Python 3.9, present par defaut sur macOS), il leve ValueError, ce
+    qui faisait silencieusement ignorer TOUTES les commandes (donc un CA a
+    0 euro) sans la moindre erreur visible. On normalise donc "Z" en
+    "+00:00" avant de parser, ce qui fonctionne sur toutes les versions de
+    Python. Leve TypeError/ValueError si value est None ou invalide (a
+    gerer par l'appelant, comme avant)."""
+    if value is None:
+        raise TypeError("valeur de date manquante")
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def get_access_token():
     """Recupere un jeton d'acces Admin API via le client credentials grant."""
     url = f"https://{SHOP}/admin/oauth/access_token"
@@ -504,7 +519,7 @@ def get_closed_returns(token, start_date):
                 continue  # deja compte cote annulations
             for refund in node.get("refunds") or []:
                 try:
-                    refunded_at = datetime.fromisoformat(refund["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+                    refunded_at = _parse_shopify_datetime(refund["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
                 except (TypeError, ValueError, KeyError):
                     continue
                 if refunded_at < start_date:
@@ -567,7 +582,7 @@ def get_cancelled_orders(token, start_date):
         for edge in block["edges"]:
             node = edge["node"]
             try:
-                cancelled_at = datetime.fromisoformat(node["cancelledAt"]).astimezone(ZoneInfo(TIMEZONE))
+                cancelled_at = _parse_shopify_datetime(node["cancelledAt"]).astimezone(ZoneInfo(TIMEZONE))
             except (TypeError, ValueError):
                 continue
             if cancelled_at < start_date:
@@ -620,7 +635,7 @@ def get_shopify_orders_since(token, start_date):
         for edge in block["edges"]:
             node = edge["node"]
             try:
-                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+                created_at = _parse_shopify_datetime(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
             except (TypeError, ValueError):
                 continue
             amount = float(node["currentTotalPriceSet"]["shopMoney"]["amount"])
@@ -944,7 +959,7 @@ def get_shopify_orders_last_30j(token):
         for edge in block["edges"]:
             node = edge["node"]
             try:
-                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+                created_at = _parse_shopify_datetime(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
             except (TypeError, ValueError):
                 continue
             shipping = node.get("shippingAddress") or {}
@@ -999,7 +1014,7 @@ def get_shopify_orders_prev_30j(token):
         for edge in block["edges"]:
             node = edge["node"]
             try:
-                created_at = datetime.fromisoformat(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
+                created_at = _parse_shopify_datetime(node["createdAt"]).astimezone(ZoneInfo(TIMEZONE))
             except (TypeError, ValueError):
                 continue
             if created_at >= cutoff:
